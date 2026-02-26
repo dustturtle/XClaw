@@ -2,7 +2,7 @@
 
 > 基于 MicroClaw 思路的 Python 多功能 Agent 运行时，聚焦任务处理 & 股票投资助手
 >
-> **目标用户**：中国用户。通信渠道支持**飞书**（Feishu/Lark）、**企业微信**（WeCom）、**钉钉**（DingTalk）及 Web 界面，**不支持 Telegram**。
+> **目标用户**：中国用户。通信渠道支持**飞书**（Feishu/Lark）、**企业微信**（WeCom）、**钉钉**（DingTalk）、**QQ 群**及 Web 界面，**不支持 Telegram**。
 
 ---
 
@@ -143,6 +143,17 @@
   - [x] 运行时接入（`xclaw/runtime.py`）
   - [x] 配置文件示例（`xclaw.config.example.yaml`）
   - [x] 自动化测试（`tests/test_wechat.py`，24 个测试）
+- [x] **QQ 群适配**（QQ 开放平台官方机器人）
+  - [x] `QQAdapter`（`xclaw/channels/qq.py`）
+    - [x] Access token 管理（自动获取 + 到期刷新）
+    - [x] 群消息处理（`GROUP_AT_MESSAGE_CREATE` 事件）
+    - [x] URL 验证回调（op=13）
+    - [x] 群消息回复（被动回复 via msg_id）
+  - [x] 配置字段（`xclaw/config.py`：`qq_enabled`、`qq_app_id`、`qq_app_secret`）
+  - [x] Webhook 路由（`xclaw/channels/web.py`：`POST /webhook/qq`）
+  - [x] 运行时接入（`xclaw/runtime.py`）
+  - [x] 配置文件示例（`xclaw.config.example.yaml`）
+  - [x] 自动化测试（`tests/test_channels.py`）
 
 ---
 
@@ -153,7 +164,7 @@
 | 语言 | Python 3.11+ |
 | 异步 | asyncio |
 | LLM 客户端 | httpx + pydantic v2 |
-| 通信渠道 | 飞书 / 企业微信 / 钉钉（中国用户）+ Web |
+| 通信渠道 | 飞书 / 企业微信 / 钉钉 / QQ 群（中国用户）+ Web |
 | Web 框架 | FastAPI + SSE |
 | 数据库 | aiosqlite |
 | 股票数据 | akshare（A股）/ yfinance（美股） |
@@ -172,6 +183,7 @@
 | 飞书（Feishu） | 企业自建应用 + 机器人 | 团队 / 企业内部使用 |
 | 企业微信（WeCom） | 企业应用 + 群机器人 webhook | 已有企微环境的用户 |
 | 钉钉（DingTalk） | 企业内部机器人 webhook | 已有钉钉环境的用户 |
+| **QQ 群** | QQ 开放平台官方机器人 | QQ 群消息驱动 |
 | **微信公众号** | 已认证服务号 + 公网 HTTPS 域名 | 面向关注公众号的微信用户 |
 | **微信小程序** | 后端 API + 小程序前端（自行开发） | 构建专属微信小程序 |
 | Web（浏览器） | FastAPI + SSE | 个人本地使用，无需企业账号 |
@@ -208,7 +220,7 @@ tests/
 ├── test_stock_tools.py       # 投资工具测试（mock akshare/yfinance）
 ├── test_memory.py            # 记忆系统测试
 ├── test_scheduler.py         # 定时任务测试
-├── test_channels.py          # 渠道适配测试（Feishu/WeCom/DingTalk/Web）
+├── test_channels.py          # 渠道适配测试（Feishu/WeCom/DingTalk/QQ/Web）
 ├── test_wechat.py            # 微信公众号 / 小程序适配测试
 └── test_phase5.py            # Phase 5 全量测试（语义记忆/MCP/Skills/回测/多用户/Docker）
 ```

@@ -34,7 +34,7 @@
 | 分类 | 特性 |
 |------|------|
 | 🤖 **AI 引擎** | 支持 Anthropic Claude、OpenAI GPT、DeepSeek、Ollama（本地模型）|
-| 💬 **多渠道** | 飞书、企业微信、钉钉、微信公众号/小程序、Web REST + SSE |
+| 💬 **多渠道** | 飞书、企业微信、钉钉、QQ 群、微信公众号/小程序、Web REST + SSE |
 | 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻 |
 | 📊 **策略回测** | 均线交叉（SMA Cross）/ RSI 策略回测，输出总收益、最大回撤、Sharpe 比率、胜率 |
 | 🧠 **智能记忆** | 文件记忆（AGENTS.md）+ 结构化记忆 + **语义搜索**（字符二元组余弦相似度，纯 Python） |
@@ -242,6 +242,19 @@ dingtalk_app_secret: "xxxx"
 dingtalk_robot_code: "xxxx"
 ```
 
+### QQ 群（QQ Group）
+
+1. 在 [QQ 开放平台](https://q.qq.com) 注册并创建机器人应用
+2. 获取 `AppID` 和 `AppSecret`
+3. 设置消息回调地址：`https://your-host/webhook/qq`
+4. 配置文件：
+
+```yaml
+qq_enabled: true
+qq_app_id: "your_app_id"
+qq_app_secret: "your_app_secret"
+```
+
 ### 微信公众号（WeChat Official Account）
 
 > 详细设计见 [`docs/wechat-design.md`](docs/wechat-design.md)
@@ -321,6 +334,7 @@ wx.request({
 | `POST /webhook/feishu` | POST | 飞书事件推送 |
 | `POST /webhook/wecom` | POST | 企业微信消息接收 |
 | `POST /webhook/dingtalk` | POST | 钉钉消息接收 |
+| `POST /webhook/qq` | POST | QQ 群消息接收 |
 | `GET /webhook/wechat_mp` | GET | 微信公众号 URL 验证（echostr challenge）|
 | `POST /webhook/wechat_mp` | POST | 微信公众号消息接收 |
 | `POST /api/wxmp/login` | POST | 微信小程序登录（`code` 换 `chat_id`）|
@@ -1095,7 +1109,7 @@ tests/
 ├── test_stock_tools.py       # 投资工具（mock akshare/yfinance）
 ├── test_memory.py            # 记忆系统
 ├── test_scheduler.py         # 定时任务
-├── test_channels.py          # 渠道适配（Feishu/WeCom/DingTalk/Web）
+├── test_channels.py          # 渠道适配（Feishu/WeCom/DingTalk/QQ/Web）
 ├── test_wechat.py            # 微信公众号/小程序（24 个测试）
 └── test_phase5.py            # Phase 5 全量测试（65 个测试）
 ```
@@ -1146,7 +1160,7 @@ class MyTool(Tool):
 | 美港股数据 | yfinance | 美股/港股历史数据 |
 | 技术分析 | pandas-ta | MA/MACD/RSI/KDJ/BOLL 等指标 |
 | 调度 | APScheduler | cron 和一次性定时任务 |
-| 通信渠道 | httpx（异步 HTTP）| 飞书 / 企业微信 / 钉钉 / 微信 |
+| 通信渠道 | httpx（异步 HTTP）| 飞书 / 企业微信 / 钉钉 / QQ 群 / 微信 |
 | 日志 | loguru | 彩色控制台 + 文件轮转 |
 | CLI | click | `xclaw start / setup / doctor` |
 | 测试 | pytest + pytest-asyncio + respx | mock httpx 请求，全异步测试 |
