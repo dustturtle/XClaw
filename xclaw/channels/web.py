@@ -6,7 +6,7 @@ from typing import Any, AsyncIterator, Callable, Coroutine
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -32,6 +32,14 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     chat_id: str
     reply: str
+
+
+class WxMpLoginRequest(BaseModel):
+    code: str
+
+
+class WxMpLoginResponse(BaseModel):
+    chat_id: str  # "wechat_mp_<openid>"
 
 
 def create_web_app(
@@ -199,6 +207,7 @@ def create_web_app(
             "feishu_enabled": settings.feishu_enabled,
             "wecom_enabled": settings.wecom_enabled,
             "dingtalk_enabled": settings.dingtalk_enabled,
+            "wechat_mp_enabled": getattr(settings, "wechat_mp_enabled", False),
             "data_dir": settings.data_dir,
             "timezone": settings.timezone,
             "stock_market_default": settings.stock_market_default,
@@ -206,5 +215,80 @@ def create_web_app(
             "rate_limit_per_minute": settings.rate_limit_per_minute,
         }
         return JSONResponse(safe)
+
+    # ── WeChat Official Account (公众号) webhook ───────────────────────────────
+    _wechat_mp_adapter: Any = None
+
+    def set_wechat_mp_adapter(adapter: Any) -> None:
+        nonlocal _wechat_mp_adapter
+        _wechat_mp_adapter = adapter
+
+    app.state.set_wechat_mp_adapter = set_wechat_mp_adapter
+
+    @app.get("/webhook/wechat_mp")
+    async def wechat_mp_verify(
+        signature: str = "",
+        timestamp: str = "",
+        nonce: str = "",
+        echostr: str = "",
+    ) -> PlainTextResponse:
+        """WeChat server URL verification (GET request with echostr challenge)."""
+        if _wechat_mp_adapter is None:
+            raise HTTPException(status_code=503, detail="WeChatMP adapter not configured")
+        if not _wechat_mp_adapter.verify_signature(signature, timestamp, nonce):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        return PlainTextResponse(echostr)
+
+    @app.post("/webhook/wechat_mp")
+    async def wechat_mp_webhook(
+        request: Request,
+        signature: str = "",
+        timestamp: str = "",
+        nonce: str = "",
+    ) -> PlainTextResponse:
+        """Receive WeChat Official Account messages (XML body)."""
+        if _wechat_mp_adapter is None:
+            raise HTTPException(status_code=503, detail="WeChatMP adapter not configured")
+        body = await request.body()
+        reply_xml = await _wechat_mp_adapter.handle_event(
+            body.decode("utf-8"),
+            signature=signature,
+            timestamp=timestamp,
+            nonce=nonce,
+        )
+        return PlainTextResponse(reply_xml, media_type="application/xml")
+
+    # ── WeChat Mini Program login ──────────────────────────────────────────────
+
+    @app.post("/api/wxmp/login", response_model=WxMpLoginResponse)
+    async def wxmp_login(req: WxMpLoginRequest) -> WxMpLoginResponse:
+        """Exchange a wx.login() code for an XClaw chat_id.
+
+        The Mini Program calls wx.login() to obtain a temporary ``code``,
+        then sends it here.  XClaw exchanges it for an OpenID via WeChat's
+        code2session API and maps the OpenID to an internal chat session.
+        """
+        if _wechat_mp_adapter is None:
+            raise HTTPException(status_code=503, detail="WeChatMP adapter not configured")
+        if not req.code:
+            raise HTTPException(status_code=400, detail="code is required")
+        try:
+            data = await _wechat_mp_adapter.code2session(req.code)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            logger.error(f"wxmp_login error: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"WeChat API error ({type(exc).__name__})",
+            )
+
+        open_id = data.get("openid", "")
+        if not open_id:
+            raise HTTPException(status_code=502, detail="No openid returned by WeChat")
+
+        # Use a namespaced chat_id so it's clearly a Mini Program session
+        chat_id = f"wechat_mp_{open_id}"
+        return WxMpLoginResponse(chat_id=chat_id)
 
     return app

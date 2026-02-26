@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **多渠道支持**：飞书（Feishu/Lark）、企业微信（WeCom）、钉钉（DingTalk）、Web 浏览器（FastAPI + SSE）
+- **多渠道支持**：飞书（Feishu/Lark）、企业微信（WeCom）、钉钉（DingTalk）、微信公众号（WeChat Official Account）、Web 浏览器（FastAPI + SSE）；微信小程序后端 API 支持
 - **投资助手**：A股/美股行情查询、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻
 - **自选股 & 持仓管理**：本地 SQLite 存储，数据不上传
 - **智能记忆**：文件记忆（AGENTS.md）+ 结构化记忆（含去重）
@@ -86,6 +86,9 @@ export XCLAW_LLM_PROVIDER="anthropic"
 | `POST /webhook/feishu` | POST | 飞书 webhook |
 | `POST /webhook/wecom` | POST | 企业微信 webhook |
 | `POST /webhook/dingtalk` | POST | 钉钉 webhook |
+| `GET /webhook/wechat_mp` | GET | 微信公众号 URL 验证 |
+| `POST /webhook/wechat_mp` | POST | 微信公众号消息接收 |
+| `POST /api/wxmp/login` | POST | 微信小程序登录（code 换 chat_id） |
 
 ## 工具参考
 
@@ -153,6 +156,28 @@ export XCLAW_LLM_PROVIDER="anthropic"
 1. 在钉钉开放平台创建企业内部机器人，获取 `App Key`、`App Secret`、`Robot Code`
 2. 设置消息接收地址：`http://your-host/webhook/dingtalk`
 3. 在配置文件中填入 `dingtalk_*` 字段并设置 `dingtalk_enabled: true`
+
+### 微信公众号（WeChat Official Account）
+
+> 详细设计见 [`docs/wechat-design.md`](docs/wechat-design.md)
+
+**前置条件**：已认证的服务号 + 公网 HTTPS 域名（个人订阅号功能受限）
+
+1. 在微信公众平台 → 开发 → 基本配置，填写服务器 URL：`https://your-host/webhook/wechat_mp`
+2. 设置 `Token`（自定义字符串，用于签名验证）
+3. 获取 `AppID` 和 `AppSecret`
+4. 在配置文件中填入 `wechat_mp_*` 字段并设置 `wechat_mp_enabled: true`
+
+### 微信小程序（WeChat Mini Program）
+
+> 详细设计见 [`docs/wechat-design.md`](docs/wechat-design.md)
+
+XClaw 只提供后端 API，前端需自行开发微信小程序：
+
+1. 注册微信小程序，获取 `AppID` 和 `AppSecret`（可与公众号共用）
+2. 在配置文件中填入 `wechat_mp_app_id` 和 `wechat_mp_app_secret`
+3. 小程序端调用 `wx.login()` 获取 `code`，发送到 `POST /api/wxmp/login` 换取 `chat_id`
+4. 后续对话直接调用 `/api/chat`，使用 `chat_id` 标识用户
 
 ## 安全设计
 

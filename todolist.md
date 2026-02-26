@@ -100,7 +100,24 @@
 - [ ] 投资回测工具
 - [ ] 多用户隔离
 - [ ] Docker 部署方案
-- [ ] 微信公众号 / 小程序适配
+- [x] **微信公众号 / 小程序适配**（详见 [`docs/wechat-design.md`](docs/wechat-design.md)）
+  - [x] 设计文档（`docs/wechat-design.md`）
+  - [x] `WeChatMPAdapter`（`xclaw/channels/wechat_mp.py`）
+    - [x] SHA1 签名验证（GET URL-verify 和 POST 消息验证）
+    - [x] XML 消息解析（文本、非文本类型）
+    - [x] MsgId 去重（防微信重试推送）
+    - [x] 被动回复（Passive Reply）立即 ACK
+    - [x] 异步客服消息 API（Customer Service API，主动推送 AI 结果）
+    - [x] Access token 管理（自动获取 + 到期刷新）
+    - [x] `code2session` API（支持小程序登录）
+  - [x] 配置字段（`xclaw/config.py`：`wechat_mp_*`）
+  - [x] 路由（`xclaw/channels/web.py`）
+    - [x] `GET /webhook/wechat_mp`（URL 验证 echostr challenge）
+    - [x] `POST /webhook/wechat_mp`（接收公众号消息）
+    - [x] `POST /api/wxmp/login`（小程序 code 换 chat_id）
+  - [x] 运行时接入（`xclaw/runtime.py`）
+  - [x] 配置文件示例（`xclaw.config.example.yaml`）
+  - [x] 自动化测试（`tests/test_wechat.py`，24 个测试）
 
 ---
 
@@ -130,6 +147,8 @@
 | 飞书（Feishu） | 企业自建应用 + 机器人 | 团队 / 企业内部使用 |
 | 企业微信（WeCom） | 企业应用 + 群机器人 webhook | 已有企微环境的用户 |
 | 钉钉（DingTalk） | 企业内部机器人 webhook | 已有钉钉环境的用户 |
+| **微信公众号** | 已认证服务号 + 公网 HTTPS 域名 | 面向关注公众号的微信用户 |
+| **微信小程序** | 后端 API + 小程序前端（自行开发） | 构建专属微信小程序 |
 | Web（浏览器） | FastAPI + SSE | 个人本地使用，无需企业账号 |
 
 > **注意**：不支持 Telegram（在中国大陆需翻墙）。
@@ -164,7 +183,8 @@ tests/
 ├── test_stock_tools.py       # 投资工具测试（mock akshare/yfinance）
 ├── test_memory.py            # 记忆系统测试
 ├── test_scheduler.py         # 定时任务测试
-└── test_channels.py          # 渠道适配测试（mock webhook）
+├── test_channels.py          # 渠道适配测试（Feishu/WeCom/DingTalk/Web）
+└── test_wechat.py            # 微信公众号 / 小程序适配测试
 ```
 
 - 使用 `pytest-asyncio` 支持异步测试

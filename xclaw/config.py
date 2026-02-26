@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     dingtalk_app_secret: str = ""
     dingtalk_robot_code: str = ""
 
+    # ── WeChat Official Account / Mini Program (微信公众号 / 小程序) ──────────
+    wechat_mp_enabled: bool = False
+    wechat_mp_app_id: str = ""
+    wechat_mp_app_secret: str = ""
+    wechat_mp_token: str = ""             # server-config token for signature verify
+    wechat_mp_encoding_aes_key: str = ""  # optional AES key for encrypted mode
+
     # ── Session management ────────────────────────────────────────────────────
     max_session_messages: int = 40
     compact_keep_recent: int = 20
