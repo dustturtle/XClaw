@@ -189,8 +189,22 @@ def skill_list(config: str) -> None:
     if skills_dir.is_dir():
         yaml_files = sorted(skills_dir.glob("*.yaml"))
         py_files = [f for f in sorted(skills_dir.glob("*.py")) if not f.stem.startswith("_")]
-        if yaml_files or py_files:
+        # SKILL.md directories
+        doc_dirs = sorted(
+            d for d in skills_dir.iterdir()
+            if d.is_dir() and not d.name.startswith("_") and (d / "SKILL.md").is_file()
+        )
+        if yaml_files or py_files or doc_dirs:
             click.echo(f"\n=== 自定义技能 ({skills_dir}) ===")
+            # Doc skills (SKILL.md directories)
+            for d in doc_dirs:
+                from xclaw.skills.doc_skill import load_doc_skill
+
+                sk = load_doc_skill(d)
+                if sk:
+                    click.echo(f"  📂 {sk.name:20s}  {sk.description}  (SKILL.md)")
+                else:
+                    click.echo(f"  ⚠️  {d.name:20s}  (SKILL.md 解析失败)")
             for f in yaml_files:
                 import yaml as _yaml
 
@@ -213,10 +227,13 @@ def skill_list(config: str) -> None:
 @click.option("--config", default="xclaw.config.yaml", help="Path to config file")
 def skill_remove(name: str, config: str) -> None:
     """Remove an installed custom skill by name."""
+    import shutil
+
     skills_dir = _resolve_skills_dir(config)
 
     yaml_path = skills_dir / f"{name}.yaml"
     py_path = skills_dir / f"{name}.py"
+    doc_dir = skills_dir / name
 
     removed = False
     if yaml_path.exists():
@@ -226,6 +243,10 @@ def skill_remove(name: str, config: str) -> None:
     if py_path.exists():
         py_path.unlink()
         click.echo(f"✅ 已删除 {py_path}")
+        removed = True
+    if doc_dir.is_dir() and (doc_dir / "SKILL.md").is_file():
+        shutil.rmtree(doc_dir)
+        click.echo(f"✅ 已删除 {doc_dir}/")
         removed = True
 
     if not removed:

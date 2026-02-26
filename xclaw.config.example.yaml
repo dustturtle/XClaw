@@ -69,7 +69,19 @@ multi_user_mode: false             # 多用户隔离：每个 token 独立 sessi
 # enabled_skills: [investment, memory, system, task_management] → 按需启用
 enabled_skills:
   - all
-# skills_dir: ""         # 自定义技能目录（可选，放置 .py 技能文件）
+# skills_dir: ""         # 自定义技能目录（可选）
+                          # 支持三种格式：
+                          #   1. SKILL.md 目录（Claude Agent Skills 协议）
+                          #   2. .yaml 声明式技能文件
+                          #   3. .py Python 技能文件
+                          # 示例目录结构：
+                          #   xclaw.data/skills/
+                          #   ├── code-reviewer/    ← SKILL.md 目录
+                          #   │   ├── SKILL.md
+                          #   │   ├── scripts/
+                          #   │   └── references/
+                          #   ├── weather.yaml      ← YAML 声明式
+                          #   └── my_crm.py         ← Python 编程式
 
 # ── MCP 工具联邦 ─────────────────────────────────────────────────────────────
 # 连接外部 MCP 服务器，自动发现并注册其工具
