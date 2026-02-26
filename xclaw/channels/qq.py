@@ -109,7 +109,6 @@ class QQAdapter(ChannelAdapter):
         if op == 13:
             d = payload.get("d", {})
             plain_token = d.get("plain_token", "")
-            event_ts = d.get("event_ts", "")
             return {
                 "plain_token": plain_token,
                 "msg": "ok",
