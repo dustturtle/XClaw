@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # ── MCP tool federation ────────────────────────────────────────────────────
     mcp_servers: list[dict] = Field(default_factory=list)
 
+    # ── MCP server (expose tools to external MCP clients) ─────────────────────
+    mcp_server_enabled: bool = False
+
     # ── Skills system ──────────────────────────────────────────────────────────
     # Pass None / ["all"] for all built-in skills; pass [] to disable all.
     enabled_skills: list[str] = Field(default_factory=lambda: ["all"])
