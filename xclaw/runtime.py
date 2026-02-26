@@ -14,30 +14,8 @@ from xclaw.config import Settings
 from xclaw.db import Database
 from xclaw.llm import create_provider
 from xclaw.memory import FileMemory, StructuredMemory
+from xclaw.skills import build_skill_registry
 from xclaw.tools import ToolRegistry
-from xclaw.tools.file_tools import ReadFileTool, WriteFileTool
-from xclaw.tools.market_overview import MarketOverviewTool
-from xclaw.tools.memory_tools import (
-    ReadMemoryTool,
-    StructuredMemoryReadTool,
-    StructuredMemoryUpdateTool,
-    WriteMemoryTool,
-)
-from xclaw.tools.portfolio import PortfolioManageTool
-from xclaw.tools.schedule import (
-    CancelScheduledTaskTool,
-    ListScheduledTasksTool,
-    ScheduleTaskTool,
-)
-from xclaw.tools.stock_fundamentals import StockFundamentalsTool
-from xclaw.tools.stock_history import StockHistoryTool
-from xclaw.tools.stock_indicators import StockIndicatorsTool
-from xclaw.tools.stock_news import StockNewsTool
-from xclaw.tools.stock_quote import StockQuoteTool
-from xclaw.tools.watchlist import WatchlistManageTool
-from xclaw.tools.web_fetch import WebFetchTool
-from xclaw.tools.web_search import WebSearchTool
-from xclaw.tools.bash_tool import BashTool
 from xclaw.tools.sub_agent import SubAgentTool
 
 def _setup_logging(settings: Settings) -> None:
@@ -52,31 +30,22 @@ def _setup_logging(settings: Settings) -> None:
 
 
 def _build_tool_registry(settings: Settings) -> ToolRegistry:
+    """Build tool registry using the Skills system."""
     registry = ToolRegistry()
-    registry.register(WebSearchTool())
-    registry.register(WebFetchTool())
-    registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
-    registry.register(ReadMemoryTool())
-    registry.register(WriteMemoryTool())
-    registry.register(StructuredMemoryReadTool())
-    registry.register(StructuredMemoryUpdateTool())
-    registry.register(ScheduleTaskTool())
-    registry.register(ListScheduledTasksTool())
-    registry.register(CancelScheduledTaskTool())
-    # Investment tools
-    registry.register(StockQuoteTool())
-    registry.register(StockHistoryTool())
-    registry.register(StockIndicatorsTool())
-    registry.register(StockFundamentalsTool())
-    registry.register(StockNewsTool())
-    registry.register(WatchlistManageTool())
-    registry.register(PortfolioManageTool())
-    registry.register(MarketOverviewTool())
-    # Optional tools
-    if settings.bash_enabled:
-        registry.register(BashTool())
-    registry.register(SubAgentTool(registry))
+
+    # Load all enabled skills (they register their tools)
+    skill_registry = build_skill_registry(
+        enabled_skills=settings.enabled_skills,
+        skills_dir=settings.skills_dir or None,
+    )
+    skill_registry.load_tools(registry, settings)
+
+    # SubAgentTool must be registered after other tools (it references the registry)
+    try:
+        registry.register(SubAgentTool(registry))
+    except ValueError:
+        pass  # already registered by a skill
+
     return registry
 
 
@@ -101,8 +70,15 @@ async def run(settings: Settings) -> None:
     file_memory = FileMemory(settings.groups_path)
     struct_memory = StructuredMemory(db)
 
-    # Tool registry
+    # Tool registry (skills-based)
     tools = _build_tool_registry(settings)
+
+    # MCP tool federation
+    mcp_clients: list[Any] = []
+    if settings.mcp_servers:
+        from xclaw.mcp import load_mcp_tools
+        mcp_clients = await load_mcp_tools(settings.mcp_servers, tools)
+        logger.info(f"MCP: loaded {len(mcp_clients)} server(s)")
 
     # ── Build message handler ─────────────────────────────────────────────────
     async def handle_message(external_chat_id: str, text: str, channel: str = "web") -> str:
@@ -194,6 +170,7 @@ async def run(settings: Settings) -> None:
             rate_limit=settings.rate_limit_per_minute,
             db=db,
             settings=settings,
+            multi_user_mode=settings.multi_user_mode,
         )
         # Register webhook adapters using isinstance checks for safety
         if settings.feishu_enabled:
@@ -224,3 +201,6 @@ async def run(settings: Settings) -> None:
     await db.close()
     for adapter in adapters:
         await adapter.stop()
+    for client in mcp_clients:
+        await client.close()
+

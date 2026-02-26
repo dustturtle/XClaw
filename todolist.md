@@ -94,12 +94,37 @@
 
 ## Phase 5：可选进阶（按需）
 
-- [ ] 语义记忆（embedding + 向量检索）
-- [ ] MCP 工具联邦
-- [ ] Skills 系统（可扩展技能包）
-- [ ] 投资回测工具
-- [ ] 多用户隔离
-- [ ] Docker 部署方案
+- [x] **语义记忆（embedding + 向量检索）**
+  - [x] 字符二元组 TF-IDF + 余弦相似度（无需额外依赖，纯 Python + math）
+  - [x] `StructuredMemory.semantic_search()` 方法
+  - [x] `SemanticMemorySearchTool` 工具
+  - [x] 无相关记忆时返回提示，支持中英文混合查询
+- [x] **MCP 工具联邦**
+  - [x] `xclaw/mcp.py`：`MCPClient`（JSON-RPC 2.0 over HTTP）
+  - [x] `MCPToolAdapter`：将 MCP 工具包装为 XClaw Tool
+  - [x] `load_mcp_tools()`：启动时批量连接并注册工具
+  - [x] 配置字段：`mcp_servers: [{name, url, timeout}]`
+  - [x] 运行时接入（`xclaw/runtime.py`）
+- [x] **Skills 系统（可扩展技能包）**
+  - [x] `xclaw/skills/__init__.py`：`Skill` 抽象基类 + `SkillRegistry`
+  - [x] 内置技能包：`investment`、`task_management`、`memory`、`system`
+  - [x] 自定义技能目录（`skills_dir`）支持热加载 `.py` 文件
+  - [x] 配置字段：`enabled_skills`（默认 `["all"]`）
+  - [x] `runtime.py` 重构为 Skills-based 工具注册
+- [x] **投资回测工具**
+  - [x] `xclaw/tools/stock_backtest.py`：`StockBacktestTool`
+  - [x] 支持策略：均线交叉（`sma_cross`）、RSI 策略（`rsi`）
+  - [x] 绩效指标：总收益率、买入持有对比、最大回撤、Sharpe 比率、胜率
+  - [x] 支持 A股（akshare）、美股/港股（yfinance）
+- [x] **多用户隔离**
+  - [x] `multi_user_mode: bool` 配置字段（默认 false）
+  - [x] Web 渠道：开启时按 Bearer Token 哈希命名 session 空间
+  - [x] 不同 token → 不同用户 → 不同 `chat_id` 空间，防止数据互访
+  - [x] 无 token / 关闭模式：行为与原来完全兼容
+- [x] **Docker 部署方案**
+  - [x] `Dockerfile`（Python 3.11-slim + 非 root 用户 + HEALTHCHECK）
+  - [x] `docker-compose.yml`（持久化 Volume + 环境变量覆盖）
+  - [x] `.dockerignore`（排除 secrets、缓存、数据目录）
 - [x] **微信公众号 / 小程序适配**（详见 [`docs/wechat-design.md`](docs/wechat-design.md)）
   - [x] 设计文档（`docs/wechat-design.md`）
   - [x] `WeChatMPAdapter`（`xclaw/channels/wechat_mp.py`）
@@ -184,7 +209,8 @@ tests/
 ├── test_memory.py            # 记忆系统测试
 ├── test_scheduler.py         # 定时任务测试
 ├── test_channels.py          # 渠道适配测试（Feishu/WeCom/DingTalk/Web）
-└── test_wechat.py            # 微信公众号 / 小程序适配测试
+├── test_wechat.py            # 微信公众号 / 小程序适配测试
+└── test_phase5.py            # Phase 5 全量测试（语义记忆/MCP/Skills/回测/多用户/Docker）
 ```
 
 - 使用 `pytest-asyncio` 支持异步测试

@@ -355,6 +355,8 @@ def test_config_api_includes_wechat_mp():
     settings.stock_market_default = "CN"
     settings.bash_enabled = False
     settings.rate_limit_per_minute = 20
+    settings.multi_user_mode = False
+    settings.enabled_skills = ["all"]
 
     async def handler(chat_id: str, text: str) -> str:
         return "ok"

@@ -6,12 +6,17 @@
 
 - **多渠道支持**：飞书（Feishu/Lark）、企业微信（WeCom）、钉钉（DingTalk）、微信公众号（WeChat Official Account）、Web 浏览器（FastAPI + SSE）；微信小程序后端 API 支持
 - **投资助手**：A股/美股行情查询、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻
+- **投资回测**：均线交叉 / RSI 策略回测，返回总收益率、最大回撤、Sharpe 比率、胜率
 - **自选股 & 持仓管理**：本地 SQLite 存储，数据不上传
-- **智能记忆**：文件记忆（AGENTS.md）+ 结构化记忆（含去重）
+- **智能记忆**：文件记忆（AGENTS.md）+ 结构化记忆（含去重）+ **语义搜索**（字符二元组余弦相似度）
+- **Skills 系统**：可扩展技能包（investment / memory / system / task_management），支持自定义技能目录
+- **MCP 工具联邦**：通过 JSON-RPC 2.0 连接外部 MCP 服务器，自动注册其工具
+- **多用户隔离**：`multi_user_mode` 开启后按 Bearer Token 哈希隔离用户 session
 - **定时任务**：APScheduler 调度，支持 cron 表达式和一次性任务，内置每日盘后推送
 - **会话持久化**：重启后自动恢复对话历史，支持上下文压缩
 - **工具风险分级**：Low / Medium / High，Bash 工具默认关闭
 - **安全设计**：路径守卫、Web 绑定本地、Auth Token、速率限制、SQL 参数化
+- **Docker 部署**：一键 `docker-compose up`，支持环境变量覆盖配置
 
 ## 快速开始
 
