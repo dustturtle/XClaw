@@ -1,0 +1,81 @@
+# XClaw 配置模板
+# 复制本文件为 xclaw.config.yaml 并填入实际值
+
+# ── LLM 配置 ──────────────────────────────────────────────────────────────────
+llm_provider: "anthropic"          # anthropic | openai | deepseek | ollama
+api_key: ""                        # LLM API Key（也可通过 XCLAW_API_KEY 环境变量设置）
+model: "claude-opus-4-5"
+max_tokens: 4096
+max_tool_iterations: 50
+
+# ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
+# Web 界面（默认启用，绑定本地，不暴露公网）
+web_enabled: true
+web_host: "127.0.0.1"
+web_port: 8080
+web_auth_token: ""                 # 留空则不验证，生产环境务必设置
+
+# 飞书（Feishu/Lark）企业自建应用
+feishu_enabled: false
+feishu_app_id: ""
+feishu_app_secret: ""
+feishu_verification_token: ""      # 事件订阅验证 Token
+feishu_encrypt_key: ""             # 事件加密 Key（可选）
+
+# 企业微信（WeCom）
+wecom_enabled: false
+wecom_corp_id: ""
+wecom_agent_id: ""
+wecom_secret: ""
+wecom_token: ""                    # 接收消息验证 Token
+wecom_encoding_aes_key: ""        # 消息加解密 Key
+
+# 钉钉（DingTalk）企业内部机器人
+dingtalk_enabled: false
+dingtalk_app_key: ""
+dingtalk_app_secret: ""
+dingtalk_robot_code: ""
+
+# 微信公众号 / 小程序（WeChat Official Account / Mini Program）
+# 需要已认证的服务号 + 公网 HTTPS 域名。详见 docs/wechat-design.md
+wechat_mp_enabled: false
+wechat_mp_app_id: ""               # 公众号 / 小程序 AppID
+wechat_mp_app_secret: ""           # 公众号 / 小程序 AppSecret
+wechat_mp_token: ""                # 服务器配置中的 Token（用于签名验证）
+wechat_mp_encoding_aes_key: ""     # 消息加解密 Key（可选，启用加密模式时填写）
+
+# ── 会话管理 ──────────────────────────────────────────────────────────────────
+max_session_messages: 40           # 超过此数量触发上下文压缩
+compact_keep_recent: 20            # 压缩后保留的最近消息数
+max_history_messages: 50
+memory_token_budget: 1500
+
+# ── 数据存储 ──────────────────────────────────────────────────────────────────
+data_dir: "./xclaw.data"
+timezone: "Asia/Shanghai"
+
+# ── 投资配置 ──────────────────────────────────────────────────────────────────
+stock_market_default: "CN"         # CN | US | HK
+stock_data_source: "akshare"       # akshare | yfinance
+
+# ── 安全配置 ──────────────────────────────────────────────────────────────────
+control_chat_ids: []               # 管理员 chat ID 列表（High 风险操作需要）
+bash_enabled: false                # Bash 工具默认关闭
+rate_limit_per_minute: 20          # Web API 速率限制（每 IP 每分钟）
+multi_user_mode: false             # 多用户隔离：每个 token 独立 session 空间
+
+# ── Skills 系统（可扩展技能包）────────────────────────────────────────────────
+# enabled_skills: [all]  → 启用全部内置技能（默认）
+# enabled_skills: [investment, memory, system, task_management] → 按需启用
+enabled_skills:
+  - all
+# skills_dir: ""         # 自定义技能目录（可选，放置 .py 技能文件）
+
+# ── MCP 工具联邦 ─────────────────────────────────────────────────────────────
+# 连接外部 MCP 服务器，自动发现并注册其工具
+# mcp_servers:
+#   - name: "my_tools"
+#     url: "http://localhost:3000"
+#     timeout: 10
+mcp_servers: []
+
