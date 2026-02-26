@@ -168,6 +168,18 @@ async def run(settings: Settings) -> None:
         )
         adapters.append(dingtalk)
 
+    if settings.wechat_mp_enabled:
+        from xclaw.channels.wechat_mp import WeChatMPAdapter
+
+        wechat_mp = WeChatMPAdapter(
+            app_id=settings.wechat_mp_app_id,
+            app_secret=settings.wechat_mp_app_secret,
+            token=settings.wechat_mp_token,
+            encoding_aes_key=settings.wechat_mp_encoding_aes_key,
+            message_handler=lambda cid, text: handle_message(cid, text, "wechat_mp"),
+        )
+        adapters.append(wechat_mp)
+
     # Start all adapters
     for adapter in adapters:
         await adapter.start()
@@ -183,9 +195,19 @@ async def run(settings: Settings) -> None:
             db=db,
             settings=settings,
         )
-        # Register webhook adapters
+        # Register webhook adapters using isinstance checks for safety
         if settings.feishu_enabled:
-            web_app.state.set_feishu_adapter(adapters[0] if adapters else None)
+            from xclaw.channels.feishu import FeishuAdapter
+            for adapter in adapters:
+                if isinstance(adapter, FeishuAdapter):
+                    web_app.state.set_feishu_adapter(adapter)
+                    break
+        if settings.wechat_mp_enabled:
+            from xclaw.channels.wechat_mp import WeChatMPAdapter
+            for adapter in adapters:
+                if isinstance(adapter, WeChatMPAdapter):
+                    web_app.state.set_wechat_mp_adapter(adapter)
+                    break
 
         config = uvicorn.Config(
             web_app,

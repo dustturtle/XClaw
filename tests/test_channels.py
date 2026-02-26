@@ -347,6 +347,7 @@ def test_web_config_with_settings():
     settings.feishu_enabled = False
     settings.wecom_enabled = False
     settings.dingtalk_enabled = False
+    settings.wechat_mp_enabled = False
     settings.data_dir = "./xclaw.data"
     settings.timezone = "Asia/Shanghai"
     settings.stock_market_default = "CN"
@@ -363,6 +364,7 @@ def test_web_config_with_settings():
     assert resp.status_code == 200
     data = resp.json()
     assert data["llm_provider"] == "anthropic"
+    assert data["wechat_mp_enabled"] is False
     # Secrets must be excluded
     assert "api_key" not in data
     assert "feishu_app_secret" not in data
