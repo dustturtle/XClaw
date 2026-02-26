@@ -112,6 +112,14 @@ class ToolRegistry:
             if not (exclude_high_risk and t.risk_level == RiskLevel.HIGH)
         ]
 
+    def get_openai_definitions(self, exclude_high_risk: bool = False) -> list[dict]:
+        """Return tool definitions in OpenAI function-calling format."""
+        return [d.to_openai_function() for d in self.get_definitions(exclude_high_risk)]
+
+    def get_mcp_definitions(self, exclude_high_risk: bool = False) -> list[dict]:
+        """Return tool definitions in MCP ``tools/list`` format."""
+        return [d.to_mcp_tool() for d in self.get_definitions(exclude_high_risk)]
+
     async def execute(
         self, name: str, params: dict[str, Any], context: ToolContext
     ) -> ToolResult:

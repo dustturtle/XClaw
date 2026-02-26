@@ -63,6 +63,7 @@ def create_web_app(
     db: Any = None,
     settings: Any = None,
     multi_user_mode: bool = False,
+    tool_registry: Any = None,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -76,6 +77,7 @@ def create_web_app(
         multi_user_mode: When True, each unique bearer token gets its own
                          isolated session namespace, preventing cross-user
                          data access on the web channel.
+        tool_registry:   Optional ToolRegistry instance (for MCP server mode)
     """
     app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs")
 
@@ -253,6 +255,7 @@ def create_web_app(
             "rate_limit_per_minute": settings.rate_limit_per_minute,
             "multi_user_mode": getattr(settings, "multi_user_mode", False),
             "enabled_skills": getattr(settings, "enabled_skills", ["all"]),
+            "mcp_server_enabled": getattr(settings, "mcp_server_enabled", False) is True,
         }
         return JSONResponse(safe)
 
@@ -330,5 +333,14 @@ def create_web_app(
         # Use a namespaced chat_id so it's clearly a Mini Program session
         chat_id = f"wechat_mp_{open_id}"
         return WxMpLoginResponse(chat_id=chat_id)
+
+    # ── MCP Server endpoint ──────────────────────────────────────────────────
+    mcp_server_enabled = getattr(settings, "mcp_server_enabled", False) if settings else False
+    if mcp_server_enabled and tool_registry is not None:
+        from xclaw.mcp_server import create_mcp_server_router
+
+        mcp_router = create_mcp_server_router(tool_registry)
+        app.include_router(mcp_router, prefix="/mcp")
+        logger.info("MCP server endpoint enabled at /mcp")
 
     return app
