@@ -22,11 +22,25 @@ except ImportError:
     _HAS_SLOWAPI = False
 
 
+# ── Request / Response models (module-level for annotation resolution) ────────
+
+class ChatRequest(BaseModel):
+    chat_id: str = "web_default"
+    message: str
+
+
+class ChatResponse(BaseModel):
+    chat_id: str
+    reply: str
+
+
 def create_web_app(
     message_handler: Callable[[str, str], Coroutine[Any, Any, str]],
     stream_handler: Callable[[str, str], AsyncIterator[str]] | None = None,
     auth_token: str = "",
     rate_limit: int = 20,
+    db: Any = None,
+    settings: Any = None,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -35,6 +49,8 @@ def create_web_app(
         stream_handler:  async (chat_id, text) → AsyncIterator[str chunk]
         auth_token:      Bearer token for simple auth (empty = disabled)
         rate_limit:      requests per minute per IP
+        db:              Optional Database instance (for /api/sessions)
+        settings:        Optional Settings instance (for /api/config)
     """
     app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs")
 
@@ -59,15 +75,6 @@ def create_web_app(
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or token != auth_token:
             raise HTTPException(status_code=401, detail="Invalid or missing token")
-
-    # ── Request / Response models ─────────────────────────────────────────────
-    class ChatRequest(BaseModel):
-        chat_id: str = "web_default"
-        message: str
-
-    class ChatResponse(BaseModel):
-        chat_id: str
-        reply: str
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
@@ -152,5 +159,52 @@ def create_web_app(
         payload = await request.json()
         result = await _dingtalk_adapter.handle_event(payload)
         return JSONResponse(result)
+
+    # ── Sessions API ──────────────────────────────────────────────────────────
+
+    @app.get("/api/sessions", dependencies=[Depends(verify_token)])
+    async def list_sessions() -> JSONResponse:
+        """List recent chats/sessions from the database."""
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        async with db.conn.execute(
+            "SELECT id, channel, external_chat_id, chat_type, title, created_at "
+            "FROM chats ORDER BY id DESC LIMIT 50"
+        ) as cur:
+            rows = await cur.fetchall()
+        return JSONResponse([dict(r) for r in rows])
+
+    @app.get("/api/sessions/{chat_id}/messages", dependencies=[Depends(verify_token)])
+    async def get_session_messages(chat_id: int, limit: int = 50) -> JSONResponse:
+        """Return recent messages for a given internal chat_id."""
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        msgs = await db.get_recent_messages(chat_id, limit=limit)
+        return JSONResponse(msgs)
+
+    # ── Config API ────────────────────────────────────────────────────────────
+
+    @app.get("/api/config", dependencies=[Depends(verify_token)])
+    async def get_config() -> JSONResponse:
+        """Return a sanitised view of the current settings (no secrets)."""
+        if settings is None:
+            raise HTTPException(status_code=503, detail="Settings not available")
+        safe = {
+            "llm_provider": settings.llm_provider,
+            "model": settings.model,
+            "max_tokens": settings.max_tokens,
+            "web_enabled": settings.web_enabled,
+            "web_host": settings.web_host,
+            "web_port": settings.web_port,
+            "feishu_enabled": settings.feishu_enabled,
+            "wecom_enabled": settings.wecom_enabled,
+            "dingtalk_enabled": settings.dingtalk_enabled,
+            "data_dir": settings.data_dir,
+            "timezone": settings.timezone,
+            "stock_market_default": settings.stock_market_default,
+            "bash_enabled": settings.bash_enabled,
+            "rate_limit_per_minute": settings.rate_limit_per_minute,
+        }
+        return JSONResponse(safe)
 
     return app

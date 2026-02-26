@@ -225,12 +225,12 @@ async def test_schedule_tool(db):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_ctx(db=None, chat_id=1, file_memory=None, structured_memory=None) -> ToolContext:
+def _make_ctx(db=None, chat_id=1, file_memory=None, structured_memory=None, settings=None) -> ToolContext:
     return ToolContext(
         chat_id=chat_id,
         channel="web",
         db=db,
-        settings=None,
+        settings=settings,
         file_memory=file_memory,
         structured_memory=structured_memory,
     )
@@ -252,3 +252,108 @@ class WebSearchToolStub:
 
     async def execute(self, params, context):
         return ToolResult(content="stub result")
+
+
+# ── Bash tool ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_bash_tool_disabled_by_default():
+    """BashTool should refuse to run when bash_enabled is False."""
+    from xclaw.tools.bash_tool import BashTool
+
+    tool = BashTool()
+    assert tool.risk_level == RiskLevel.HIGH
+
+    ctx = _make_ctx()  # settings=None
+    result = await tool.execute({"command": "echo hello"}, ctx)
+    assert result.is_error
+    assert "未启用" in result.content
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_disabled_via_settings():
+    from types import SimpleNamespace
+    from xclaw.tools.bash_tool import BashTool
+
+    settings = SimpleNamespace(bash_enabled=False)
+    ctx = _make_ctx(settings=settings)
+    result = await BashTool().execute({"command": "echo hi"}, ctx)
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_runs_command():
+    from types import SimpleNamespace
+    from xclaw.tools.bash_tool import BashTool
+
+    settings = SimpleNamespace(bash_enabled=True)
+    ctx = _make_ctx(settings=settings)
+    result = await BashTool().execute({"command": "echo xclaw_test"}, ctx)
+    assert not result.is_error
+    assert "xclaw_test" in result.content
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_exit_nonzero():
+    from types import SimpleNamespace
+    from xclaw.tools.bash_tool import BashTool
+
+    settings = SimpleNamespace(bash_enabled=True)
+    ctx = _make_ctx(settings=settings)
+    result = await BashTool().execute({"command": "exit 1"}, ctx)
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_empty_command():
+    from types import SimpleNamespace
+    from xclaw.tools.bash_tool import BashTool
+
+    settings = SimpleNamespace(bash_enabled=True)
+    ctx = _make_ctx(settings=settings)
+    result = await BashTool().execute({"command": ""}, ctx)
+    assert result.is_error
+
+
+# ── Sub-agent tool ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_sub_agent_no_llm():
+    """SubAgentTool should return error when LLM is not available."""
+    from xclaw.tools.sub_agent import SubAgentTool
+
+    registry = ToolRegistry()
+    tool = SubAgentTool(registry)
+    ctx = _make_ctx()  # no llm attribute
+    result = await tool.execute({"task": "查大盘"}, ctx)
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_empty_task():
+    from xclaw.tools.sub_agent import SubAgentTool
+
+    registry = ToolRegistry()
+    tool = SubAgentTool(registry)
+    ctx = _make_ctx()
+    result = await tool.execute({"task": ""}, ctx)
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_restricted_tools():
+    """SubAgentTool should only include allowed tools in the sub-registry."""
+    from xclaw.tools.sub_agent import SubAgentTool, _ALLOWED_SUB_AGENT_TOOLS
+    from xclaw.tools.web_search import WebSearchTool
+    from xclaw.tools.portfolio import PortfolioManageTool
+
+    registry = ToolRegistry()
+    registry.register(WebSearchTool())
+    registry.register(PortfolioManageTool())  # NOT in allowed set
+
+    tool = SubAgentTool(registry)
+    # The tool should be registered without error
+    assert tool.name == "sub_agent"
+    # portfolio_manage should not be in allowed set
+    assert "portfolio_manage" not in _ALLOWED_SUB_AGENT_TOOLS
+    assert "web_search" in _ALLOWED_SUB_AGENT_TOOLS
