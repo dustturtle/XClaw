@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     control_chat_ids: list[str] = Field(default_factory=list)
     bash_enabled: bool = False
     rate_limit_per_minute: int = 20
+    multi_user_mode: bool = False  # when True, web chat_id is scoped by auth token
+
+    # ── MCP tool federation ────────────────────────────────────────────────────
+    mcp_servers: list[dict] = Field(default_factory=list)
+
+    # ── Skills system ──────────────────────────────────────────────────────────
+    # Pass None / ["all"] for all built-in skills; pass [] to disable all.
+    enabled_skills: list[str] = Field(default_factory=lambda: ["all"])
+    skills_dir: str = ""  # optional directory for custom skill .py files
 
     @field_validator("llm_provider")
     @classmethod

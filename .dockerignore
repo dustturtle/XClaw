@@ -1,0 +1,41 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Dev tools
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Runtime data (mounted as Docker volume instead)
+xclaw.data/
+
+# Config file (may contain secrets)
+xclaw.config.yaml
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp

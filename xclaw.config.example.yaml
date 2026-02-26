@@ -62,3 +62,20 @@ stock_data_source: "akshare"       # akshare | yfinance
 control_chat_ids: []               # 管理员 chat ID 列表（High 风险操作需要）
 bash_enabled: false                # Bash 工具默认关闭
 rate_limit_per_minute: 20          # Web API 速率限制（每 IP 每分钟）
+multi_user_mode: false             # 多用户隔离：每个 token 独立 session 空间
+
+# ── Skills 系统（可扩展技能包）────────────────────────────────────────────────
+# enabled_skills: [all]  → 启用全部内置技能（默认）
+# enabled_skills: [investment, memory, system, task_management] → 按需启用
+enabled_skills:
+  - all
+# skills_dir: ""         # 自定义技能目录（可选，放置 .py 技能文件）
+
+# ── MCP 工具联邦 ─────────────────────────────────────────────────────────────
+# 连接外部 MCP 服务器，自动发现并注册其工具
+# mcp_servers:
+#   - name: "my_tools"
+#     url: "http://localhost:3000"
+#     timeout: 10
+mcp_servers: []
+

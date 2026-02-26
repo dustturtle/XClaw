@@ -353,6 +353,8 @@ def test_web_config_with_settings():
     settings.stock_market_default = "CN"
     settings.bash_enabled = False
     settings.rate_limit_per_minute = 20
+    settings.multi_user_mode = False
+    settings.enabled_skills = ["all"]
     # Sensitive fields on the settings object that should NOT be exposed
     settings.api_key = "sk-super-secret-key"
     settings.feishu_app_secret = "feishu-secret"

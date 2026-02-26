@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -42,6 +43,18 @@ class WxMpLoginResponse(BaseModel):
     chat_id: str  # "wechat_mp_<openid>"
 
 
+def _user_namespace(token: str) -> str:
+    """Derive a short, stable user-namespace string from a bearer token.
+
+    The namespace is the first 16 hex characters of SHA-256(token),
+    giving 64 bits of uniqueness which avoids birthday-paradox collisions
+    up to ~billions of tokens.
+    It is used to prefix ``chat_id`` values in multi-user mode so that
+    each unique bearer token maps to its own isolated session space.
+    """
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 def create_web_app(
     message_handler: Callable[[str, str], Coroutine[Any, Any, str]],
     stream_handler: Callable[[str, str], AsyncIterator[str]] | None = None,
@@ -49,6 +62,7 @@ def create_web_app(
     rate_limit: int = 20,
     db: Any = None,
     settings: Any = None,
+    multi_user_mode: bool = False,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -59,6 +73,9 @@ def create_web_app(
         rate_limit:      requests per minute per IP
         db:              Optional Database instance (for /api/sessions)
         settings:        Optional Settings instance (for /api/config)
+        multi_user_mode: When True, each unique bearer token gets its own
+                         isolated session namespace, preventing cross-user
+                         data access on the web channel.
     """
     app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs")
 
@@ -77,12 +94,29 @@ def create_web_app(
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # ── Auth helper ───────────────────────────────────────────────────────────
+    def _extract_token(authorization: str) -> str:
+        """Extract the bearer token from an Authorization header value."""
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            return ""
+        return token
+
     def verify_token(authorization: str = Header(default="")) -> None:
         if not auth_token:
             return
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or token != auth_token:
+        token = _extract_token(authorization)
+        if token != auth_token:
             raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+    def _effective_chat_id(req_chat_id: str, authorization: str = "") -> str:
+        """Return the effective chat_id, namespaced by user in multi-user mode."""
+        if not multi_user_mode or not auth_token:
+            return req_chat_id
+        token = _extract_token(authorization)
+        if not token:
+            return req_chat_id
+        ns = _user_namespace(token)
+        return f"web_{ns}_{req_chat_id}"
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
@@ -91,24 +125,28 @@ def create_web_app(
         return {"status": "ok", "service": "xclaw"}
 
     @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_token)])
-    async def chat(req: ChatRequest) -> ChatResponse:
+    async def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
         """Non-streaming chat endpoint."""
+        effective_id = _effective_chat_id(req.chat_id, authorization)
         try:
-            reply = await message_handler(req.chat_id, req.message)
-            return ChatResponse(chat_id=req.chat_id, reply=reply)
+            reply = await message_handler(effective_id, req.message)
+            return ChatResponse(chat_id=effective_id, reply=reply)
         except Exception as exc:
             logger.error(f"Chat endpoint error: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.post("/api/chat/stream", dependencies=[Depends(verify_token)])
-    async def chat_stream(req: ChatRequest) -> EventSourceResponse:
+    async def chat_stream(
+        req: ChatRequest, authorization: str = Header(default="")
+    ) -> EventSourceResponse:
         """SSE streaming chat endpoint."""
         if stream_handler is None:
             raise HTTPException(status_code=501, detail="Streaming not enabled")
+        effective_id = _effective_chat_id(req.chat_id, authorization)
 
         async def event_generator():
             try:
-                async for chunk in stream_handler(req.chat_id, req.message):
+                async for chunk in stream_handler(effective_id, req.message):
                     yield {"data": chunk}
                 yield {"data": "[DONE]"}
             except Exception as exc:
@@ -213,6 +251,8 @@ def create_web_app(
             "stock_market_default": settings.stock_market_default,
             "bash_enabled": settings.bash_enabled,
             "rate_limit_per_minute": settings.rate_limit_per_minute,
+            "multi_user_mode": getattr(settings, "multi_user_mode", False),
+            "enabled_skills": getattr(settings, "enabled_skills", ["all"]),
         }
         return JSONResponse(safe)
 

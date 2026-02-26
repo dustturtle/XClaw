@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  xclaw:
+    build: .
+    image: xclaw:latest
+    container_name: xclaw
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist all XClaw data (database, logs, memory files)
+      - xclaw_data:/data
+      # Mount config file from host (copy xclaw.config.example.yaml → xclaw.config.yaml first)
+      - ./xclaw.config.yaml:/app/xclaw.config.yaml:ro
+    environment:
+      - XCLAW_DATA_DIR=/data
+      - XCLAW_WEB_HOST=0.0.0.0
+      # Override individual settings via environment variables:
+      # - XCLAW_API_KEY=sk-...
+      # - XCLAW_MODEL=claude-opus-4-5
+      # - XCLAW_WEB_AUTH_TOKEN=your-secret-token
+      # - XCLAW_MULTI_USER_MODE=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  xclaw_data:
+    driver: local

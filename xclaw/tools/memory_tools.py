@@ -150,3 +150,60 @@ class StructuredMemoryUpdateTool(Tool):
         if memory_id is None:
             return ToolResult(content="相似记忆已存在，已跳过（自动去重）")
         return ToolResult(content=f"记忆已保存 (id={memory_id})")
+
+
+class SemanticMemorySearchTool(Tool):
+    """Search memories by semantic similarity (character bi-gram cosine similarity)."""
+
+    @property
+    def name(self) -> str:
+        return "semantic_memory_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "用语义相似度搜索结构化记忆。返回与查询最相关的记忆条目，"
+            "支持中英文混合查询，无需精确关键词匹配。"
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索查询文本",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "返回最多几条结果（默认 5）",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        }
+
+    @property
+    def risk_level(self) -> RiskLevel:
+        return RiskLevel.LOW
+
+    async def execute(self, params: dict[str, Any], context: ToolContext) -> ToolResult:
+        if context.structured_memory is None:
+            return ToolResult(content="结构化记忆系统未启用", is_error=True)
+        query = params.get("query", "").strip()
+        if not query:
+            return ToolResult(content="查询不能为空", is_error=True)
+        top_k = max(1, min(int(params.get("top_k", 5)), 20))
+        results = await context.structured_memory.semantic_search(
+            context.chat_id, query, top_k=top_k
+        )
+        if not results:
+            return ToolResult(content="未找到相关记忆")
+        lines = []
+        for r in results:
+            cat = f"[{r.get('category', '未分类')}] " if r.get("category") else ""
+            score = r.get("score", 0.0)
+            lines.append(f"({score:.2f}) {cat}{r['content']}")
+        return ToolResult(content="\n".join(lines))
+
