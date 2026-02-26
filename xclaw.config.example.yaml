@@ -1,0 +1,56 @@
+# XClaw 配置模板
+# 复制本文件为 xclaw.config.yaml 并填入实际值
+
+# ── LLM 配置 ──────────────────────────────────────────────────────────────────
+llm_provider: "anthropic"          # anthropic | openai | deepseek | ollama
+api_key: ""                        # LLM API Key（也可通过 XCLAW_API_KEY 环境变量设置）
+model: "claude-opus-4-5"
+max_tokens: 4096
+max_tool_iterations: 50
+
+# ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
+# Web 界面（默认启用，绑定本地，不暴露公网）
+web_enabled: true
+web_host: "127.0.0.1"
+web_port: 8080
+web_auth_token: ""                 # 留空则不验证，生产环境务必设置
+
+# 飞书（Feishu/Lark）企业自建应用
+feishu_enabled: false
+feishu_app_id: ""
+feishu_app_secret: ""
+feishu_verification_token: ""      # 事件订阅验证 Token
+feishu_encrypt_key: ""             # 事件加密 Key（可选）
+
+# 企业微信（WeCom）
+wecom_enabled: false
+wecom_corp_id: ""
+wecom_agent_id: ""
+wecom_secret: ""
+wecom_token: ""                    # 接收消息验证 Token
+wecom_encoding_aes_key: ""        # 消息加解密 Key
+
+# 钉钉（DingTalk）企业内部机器人
+dingtalk_enabled: false
+dingtalk_app_key: ""
+dingtalk_app_secret: ""
+dingtalk_robot_code: ""
+
+# ── 会话管理 ──────────────────────────────────────────────────────────────────
+max_session_messages: 40           # 超过此数量触发上下文压缩
+compact_keep_recent: 20            # 压缩后保留的最近消息数
+max_history_messages: 50
+memory_token_budget: 1500
+
+# ── 数据存储 ──────────────────────────────────────────────────────────────────
+data_dir: "./xclaw.data"
+timezone: "Asia/Shanghai"
+
+# ── 投资配置 ──────────────────────────────────────────────────────────────────
+stock_market_default: "CN"         # CN | US | HK
+stock_data_source: "akshare"       # akshare | yfinance
+
+# ── 安全配置 ──────────────────────────────────────────────────────────────────
+control_chat_ids: []               # 管理员 chat ID 列表（High 风险操作需要）
+bash_enabled: false                # Bash 工具默认关闭
+rate_limit_per_minute: 20          # Web API 速率限制（每 IP 每分钟）
