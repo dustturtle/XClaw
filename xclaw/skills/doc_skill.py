@@ -60,6 +60,13 @@ from loguru import logger
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult, ToolRegistry
 
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_MAX_CONTENT_CHARS = 8000    # max characters returned from any single action
+_MAX_STDERR_CHARS = 2000     # max stderr characters included in script output
+_SCRIPT_TIMEOUT_SECONDS = 30  # subprocess timeout for run_script
+
+
 # ── SKILL.md frontmatter parser ───────────────────────────────────────────────
 
 _FRONTMATTER_RE = re.compile(
@@ -97,8 +104,6 @@ class DocSkillTool(Tool):
     * ``read_reference``    – reads a document from ``references/``
     * ``list_files``        – lists available scripts, references, and resources
     """
-
-    _SCRIPT_TIMEOUT = 30  # seconds
 
     def __init__(self, skill: "DocSkill") -> None:
         self._skill = skill
@@ -210,18 +215,17 @@ class DocSkillTool(Tool):
                 cwd=str(self._skill.skill_dir),
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._SCRIPT_TIMEOUT
+                proc.communicate(), timeout=_SCRIPT_TIMEOUT_SECONDS
             )
             output = stdout.decode(errors="replace")
             err_output = stderr.decode(errors="replace")
 
-            MAX_CHARS = 8000
-            if len(output) > MAX_CHARS:
-                output = output[:MAX_CHARS] + f"\n... [截断，已显示前 {MAX_CHARS} 字符]"
+            if len(output) > _MAX_CONTENT_CHARS:
+                output = output[:_MAX_CONTENT_CHARS] + f"\n... [截断，已显示前 {_MAX_CONTENT_CHARS} 字符]"
 
             result_text = output
             if err_output:
-                result_text += f"\n[stderr]\n{err_output[:2000]}"
+                result_text += f"\n[stderr]\n{err_output[:_MAX_STDERR_CHARS]}"
             if proc.returncode != 0:
                 result_text += f"\n[exit code: {proc.returncode}]"
 
@@ -231,7 +235,7 @@ class DocSkillTool(Tool):
             )
         except asyncio.TimeoutError:
             return ToolResult(
-                content=f"脚本执行超时 ({self._SCRIPT_TIMEOUT}s)", is_error=True
+                content=f"脚本执行超时 ({_SCRIPT_TIMEOUT_SECONDS}s)", is_error=True
             )
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"脚本执行失败: {exc}", is_error=True)
@@ -256,9 +260,8 @@ class DocSkillTool(Tool):
 
         try:
             text = ref_path.read_text(encoding="utf-8")
-            MAX_CHARS = 8000
-            if len(text) > MAX_CHARS:
-                text = text[:MAX_CHARS] + f"\n... [截断，已显示前 {MAX_CHARS} 字符]"
+            if len(text) > _MAX_CONTENT_CHARS:
+                text = text[:_MAX_CONTENT_CHARS] + f"\n... [截断，已显示前 {_MAX_CONTENT_CHARS} 字符]"
             return ToolResult(content=text)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"读取失败: {exc}", is_error=True)
