@@ -44,6 +44,12 @@ wechat_mp_app_secret: ""           # 公众号 / 小程序 AppSecret
 wechat_mp_token: ""                # 服务器配置中的 Token（用于签名验证）
 wechat_mp_encoding_aes_key: ""     # 消息加解密 Key（可选，启用加密模式时填写）
 
+# QQ 群（QQ Open Platform 官方机器人）
+# 需要在 QQ 开放平台 (https://q.qq.com) 注册机器人应用。
+qq_enabled: false
+qq_app_id: ""                      # QQ 机器人 AppID
+qq_app_secret: ""                  # QQ 机器人 AppSecret
+
 # ── 会话管理 ──────────────────────────────────────────────────────────────────
 max_session_messages: 40           # 超过此数量触发上下文压缩
 compact_keep_recent: 20            # 压缩后保留的最近消息数

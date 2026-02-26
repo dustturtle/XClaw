@@ -1,4 +1,4 @@
-"""Tests for channel adapters: Feishu, WeCom, DingTalk, and Web."""
+"""Tests for channel adapters: Feishu, WeCom, DingTalk, QQ, and Web."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from xclaw.channels.feishu import FeishuAdapter
 from xclaw.channels.wecom import WeComAdapter
 from xclaw.channels.dingtalk import DingTalkAdapter
+from xclaw.channels.qq import QQAdapter
 from xclaw.channels.web import create_web_app
 
 
@@ -248,6 +249,95 @@ async def test_dingtalk_start_stop():
         await adapter.stop()
 
 
+# ── QQ adapter ────────────────────────────────────────────────────────────────
+
+def _make_qq(handler=None) -> QQAdapter:
+    return QQAdapter(
+        app_id="app_id",
+        app_secret="secret",
+        message_handler=handler or AsyncMock(return_value="ok"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_qq_receive_group_message():
+    handler = AsyncMock(return_value="reply")
+    adapter = _make_qq(handler)
+    payload = {
+        "op": 0,
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "group_openid": "group123",
+            "id": "msg456",
+            "content": "你好机器人",
+        },
+    }
+    with patch.object(adapter, "send_response", new=AsyncMock()):
+        result = await adapter.handle_event(payload)
+    assert result == {"msg": "ok"}
+    handler.assert_called_once_with("group123:msg456", "你好机器人")
+
+
+@pytest.mark.asyncio
+async def test_qq_receive_group_message_no_msg_id():
+    handler = AsyncMock(return_value="reply")
+    adapter = _make_qq(handler)
+    payload = {
+        "op": 0,
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "group_openid": "group123",
+            "content": "测试消息",
+        },
+    }
+    with patch.object(adapter, "send_response", new=AsyncMock()):
+        result = await adapter.handle_event(payload)
+    assert result == {"msg": "ok"}
+    handler.assert_called_once_with("group123", "测试消息")
+
+
+@pytest.mark.asyncio
+async def test_qq_empty_text_not_dispatched():
+    handler = AsyncMock()
+    adapter = _make_qq(handler)
+    payload = {
+        "op": 0,
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {"group_openid": "g1", "id": "m1", "content": "   "},
+    }
+    await adapter.handle_event(payload)
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_qq_url_verification():
+    adapter = _make_qq()
+    payload = {
+        "op": 13,
+        "d": {"plain_token": "abc123", "event_ts": "12345"},
+    }
+    result = await adapter.handle_event(payload)
+    assert result["plain_token"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_qq_unknown_event_type():
+    handler = AsyncMock()
+    adapter = _make_qq(handler)
+    payload = {"op": 0, "t": "SOME_OTHER_EVENT", "d": {}}
+    result = await adapter.handle_event(payload)
+    assert result == {"msg": "ok"}
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_qq_start_stop():
+    adapter = _make_qq()
+    await adapter.start()
+    with patch.object(adapter._client, "aclose", new=AsyncMock()):
+        await adapter.stop()
+
+
 # ── Web channel (FastAPI) ─────────────────────────────────────────────────────
 
 def _make_web_app(handler=None, auth_token="", db=None, settings=None):
@@ -303,6 +393,13 @@ def test_web_feishu_webhook_not_configured():
     assert resp.status_code == 503
 
 
+def test_web_qq_webhook_not_configured():
+    app = _make_web_app()
+    client = TestClient(app)
+    resp = client.post("/webhook/qq", json={"op": 0, "t": "GROUP_AT_MESSAGE_CREATE", "d": {}})
+    assert resp.status_code == 503
+
+
 def test_web_sessions_no_db():
     app = _make_web_app()
     client = TestClient(app)
@@ -348,6 +445,7 @@ def test_web_config_with_settings():
     settings.wecom_enabled = False
     settings.dingtalk_enabled = False
     settings.wechat_mp_enabled = False
+    settings.qq_enabled = False
     settings.data_dir = "./xclaw.data"
     settings.timezone = "Asia/Shanghai"
     settings.stock_market_default = "CN"

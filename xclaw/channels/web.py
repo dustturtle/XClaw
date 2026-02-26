@@ -208,6 +208,23 @@ def create_web_app(
         result = await _dingtalk_adapter.handle_event(payload)
         return JSONResponse(result)
 
+    # ── QQ webhook ────────────────────────────────────────────────────────────
+    _qq_adapter: Any = None
+
+    def set_qq_adapter(adapter: Any) -> None:
+        nonlocal _qq_adapter
+        _qq_adapter = adapter
+
+    app.state.set_qq_adapter = set_qq_adapter
+
+    @app.post("/webhook/qq")
+    async def qq_webhook(request: Request) -> JSONResponse:
+        if _qq_adapter is None:
+            raise HTTPException(status_code=503, detail="QQ adapter not configured")
+        payload = await request.json()
+        result = await _qq_adapter.handle_event(payload)
+        return JSONResponse(result)
+
     # ── Sessions API ──────────────────────────────────────────────────────────
 
     @app.get("/api/sessions", dependencies=[Depends(verify_token)])
@@ -248,6 +265,7 @@ def create_web_app(
             "wecom_enabled": settings.wecom_enabled,
             "dingtalk_enabled": settings.dingtalk_enabled,
             "wechat_mp_enabled": getattr(settings, "wechat_mp_enabled", False),
+            "qq_enabled": getattr(settings, "qq_enabled", False),
             "data_dir": settings.data_dir,
             "timezone": settings.timezone,
             "stock_market_default": settings.stock_market_default,

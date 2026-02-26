@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     wechat_mp_token: str = ""             # server-config token for signature verify
     wechat_mp_encoding_aes_key: str = ""  # optional AES key for encrypted mode
 
+    # ── QQ Group (QQ 群) ──────────────────────────────────────────────────────
+    qq_enabled: bool = False
+    qq_app_id: str = ""
+    qq_app_secret: str = ""
+
     # ── Session management ────────────────────────────────────────────────────
     max_session_messages: int = 40
     compact_keep_recent: int = 20
