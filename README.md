@@ -38,7 +38,7 @@
 | 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻 |
 | 📊 **策略回测** | 均线交叉（SMA Cross）/ RSI 策略回测，输出总收益、最大回撤、Sharpe 比率、胜率 |
 | 🧠 **智能记忆** | 文件记忆（AGENTS.md）+ 结构化记忆 + **语义搜索**（字符二元组余弦相似度，纯 Python） |
-| 🔌 **Skills 系统** | 可插拔技能包（investment/memory/system/task_management），支持自定义技能目录 |
+| 🔌 **Skills 系统** | 可插拔技能包，支持 **SKILL.md 目录**（Claude Agent Skills 协议）、YAML 声明式、Python 编程式三种定义方式 |
 | 🌐 **MCP 联邦** | JSON-RPC 2.0 连接外部 MCP 服务器，自动注册其工具到 Agent |
 | 🔄 **协议兼容** | 支持 MCP Server 模式（暴露工具给外部 Agent）、OpenAI function calling 格式双向转换 |
 | 👥 **多用户隔离** | `multi_user_mode` 按 Bearer Token 哈希隔离用户 session |
@@ -404,6 +404,14 @@ remember: 我的风险偏好是保守型
 
 Skills（技能包）是 XClaw 的可扩展工具管理机制。每个 Skill 是一组相关工具的集合，可按需启用/禁用。
 
+XClaw 支持三种自定义技能定义方式：
+
+| 方式 | 适用场景 | 文件格式 |
+|------|----------|----------|
+| **SKILL.md 目录**（推荐） | 复杂 SOP 任务、带脚本/参考文档的技能 | 目录 + Markdown |
+| **YAML 文件** | 简单 HTTP API 封装 | 单个 `.yaml` 文件 |
+| **Python 文件** | 需要复杂编程逻辑的技能 | 单个 `.py` 文件 |
+
 ### 内置技能包
 
 | Skill 名称 | 包含工具 |
@@ -426,13 +434,151 @@ enabled_skills:
   - memory
   - system
 
-# 自定义技能目录
+# 自定义技能目录（放置 SKILL.md 目录、.yaml 文件、.py 文件）
 skills_dir: "./xclaw.data/skills"
 ```
 
-### 用 YAML 编写自定义技能（推荐）
+---
 
-无需编写 Python 代码，只需在 `skills_dir` 目录下创建 `.yaml` 文件即可定义新技能：
+### 用 SKILL.md 编写自定义技能（推荐）
+
+XClaw 兼容 **Claude Agent Skills 协议**，用户可以像写文档一样定义技能，无需编写任何 Python 代码。
+
+#### 目录结构
+
+在 `skills_dir` 下创建一个文件夹，包含 `SKILL.md` 入口文件：
+
+```text
+skills_dir/
+└── code-reviewer/            # 技能目录（小写 + 短横线命名）
+    ├── SKILL.md              # 核心定义与入口文件（必须）
+    ├── references/           # 参考文档（可选）
+    │   ├── rules.md
+    │   └── api-docs.md
+    ├── scripts/              # 可执行脚本（可选）
+    │   ├── analyze.py
+    │   └── validate.sh
+    └── resources/            # 静态数据/资源（可选）
+```
+
+#### SKILL.md 格式
+
+`SKILL.md` 由 **YAML Frontmatter**（元数据）和 **Markdown 正文**（指令）组成：
+
+```markdown
+---
+name: code-reviewer
+description: "代码审查助手，按照团队规范检查代码质量"
+---
+
+# Code Reviewer
+
+## 执行步骤
+
+1. 调用 `list_files` 查看技能目录结构
+2. 使用 `read_reference` 读取 `rules.md` 了解审查规范
+3. 让用户提供要审查的代码文件
+4. 按照规范逐项检查，输出审查报告
+5. 如果需要静态分析，使用 `run_script` 执行 `analyze.py`
+
+## 输出格式
+
+- 每个问题标注严重级别：🔴 严重 / 🟡 警告 / 🔵 建议
+- 给出修复建议和示例代码
+```
+
+#### SKILL.md 规范
+
+| 字段 | 说明 | 要求 |
+|------|------|------|
+| `name` | 技能唯一名称（小写 + 短横线） | 必须，最多 64 字符 |
+| `description` | 技能描述（AI 据此判断何时启用） | 必须 |
+| 正文 | 系统指令、执行步骤、引用指南 | 建议 500 行以内 |
+
+#### 渐进式披露（Progressive Disclosure）
+
+这是 SKILL.md 协议的核心设计，极大节省 Token 成本：
+
+```text
+┌─────────────────────────────────────────────┐
+│  启动时（预加载）                              │
+│  只加载 name + description → 极少 Token       │
+└─────────────────────┬───────────────────────┘
+                      │ 用户下达任务
+                      ▼
+┌─────────────────────────────────────────────┐
+│  按需加载                                     │
+│  AI 判断需要 → 调用 read_instructions         │
+│  读取 SKILL.md 正文 → 获取执行步骤            │
+└─────────────────────┬───────────────────────┘
+                      │ 需要辅助信息
+                      ▼
+┌─────────────────────────────────────────────┐
+│  无上下文惩罚执行                              │
+│  run_script → 只返回输出，不占上下文           │
+│  read_reference → 按需读取参考文档             │
+└─────────────────────────────────────────────┘
+```
+
+#### 工具操作说明
+
+每个 SKILL.md 技能自动注册为一个工具 `skill_<name>`（短横线转下划线），支持四种操作：
+
+| 操作 | 说明 | 参数 |
+|------|------|------|
+| `read_instructions` | 读取 SKILL.md 正文（执行步骤） | 无 |
+| `run_script` | 运行 `scripts/` 下的脚本，返回输出 | `filename`, `args`（可选） |
+| `read_reference` | 读取 `references/` 下的参考文档 | `filename` |
+| `list_files` | 列出技能目录下所有文件 | 无 |
+
+脚本执行安全机制：
+- 只能运行技能目录内 `scripts/` 下的文件
+- 路径穿越自动拦截（`..`、`/` 等）
+- 执行超时 30 秒
+- `.py` 文件用 `python` 执行，`.sh` 文件用 `bash` 执行
+
+#### 完整示例：投研分析技能
+
+```text
+xclaw.data/skills/
+└── stock-research/
+    ├── SKILL.md
+    ├── scripts/
+    │   └── sector_analysis.py
+    └── references/
+        └── analysis-framework.md
+```
+
+`SKILL.md`：
+
+```markdown
+---
+name: stock-research
+description: "A股行业研究助手，按照标准投研框架输出行业分析报告"
+---
+
+# 行业研究助手
+
+## 执行步骤
+
+1. 调用 `read_reference` 读取 `analysis-framework.md` 了解分析框架
+2. 使用内置的 `stock_quote` 和 `market_overview` 工具获取行情数据
+3. 使用 `run_script` 执行 `sector_analysis.py` 获取板块数据
+4. 按照框架撰写研究报告
+
+## 报告结构
+
+- 行业概况与趋势
+- 核心驱动因素
+- 重点公司分析
+- 风险提示
+```
+
+---
+
+### 用 YAML 编写自定义技能
+
+适合将外部 HTTP API 快速封装为技能。在 `skills_dir` 目录下创建 `.yaml` 文件：
 
 ```yaml
 # xclaw.data/skills/weather.yaml
@@ -512,6 +658,8 @@ tools:
         title: "{{title}}"
         text: "{{message}}"
 ```
+
+---
 
 ### 导入别人的技能
 
@@ -643,6 +791,7 @@ XClaw 的 Skills 系统兼容以下开放标准协议：
 
 | 协议 | 支持方式 | 说明 |
 |------|----------|------|
+| **Claude Agent Skills** | 原生支持 | SKILL.md 目录结构 + 渐进式披露 + 脚本执行 |
 | **MCP (Model Context Protocol)** | 客户端 + 服务端 | 连接外部 MCP 服务器 / 将工具暴露为 MCP 服务 |
 | **OpenAI Function Calling** | 格式转换 | `ToolDefinition.to_openai_function()` / `from_openai_function()` 双向转换 |
 | **JSON Schema** | 原生支持 | 工具参数定义使用标准 JSON Schema |

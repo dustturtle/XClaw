@@ -245,9 +245,38 @@ def _load_skills_from_dir(
     skills_dir: Path,
     requested_names: list[str],
 ) -> None:
-    """Scan *skills_dir* for ``.py`` and ``.yaml`` files and load Skill instances."""
+    """Scan *skills_dir* for skill definitions.
+
+    Supports three formats (checked in this order):
+
+    1. **SKILL.md directories** – sub-directories containing a ``SKILL.md``
+       file (Claude Agent Skills protocol).
+    2. **YAML skill files** – ``.yaml`` files with declarative tool defs.
+    3. **Python skill files** – ``.py`` files with ``Skill`` subclasses.
+    """
     if not skills_dir.is_dir():
         return
+
+    # ── SKILL.md directories (Claude Agent Skills protocol) ───────────────
+    for entry in sorted(skills_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("_"):
+            continue
+        skill_md = entry / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+        # Check if explicitly requested (or "all")
+        dir_name = entry.name.replace("-", "_")
+        if requested_names != _ALL_BUILTIN_NAMES and dir_name not in requested_names:
+            continue
+        from xclaw.skills.doc_skill import load_doc_skill
+
+        skill = load_doc_skill(entry)
+        if skill is not None:
+            try:
+                registry.register(skill)
+                logger.info(f"Doc skill '{skill.name}' loaded from {entry}")
+            except ValueError:
+                pass
 
     # ── YAML skill files ──────────────────────────────────────────────────
     for yaml_file in sorted(skills_dir.glob("*.yaml")):
