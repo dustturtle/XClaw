@@ -40,6 +40,7 @@
 | 🧠 **智能记忆** | 文件记忆（AGENTS.md）+ 结构化记忆 + **语义搜索**（字符二元组余弦相似度，纯 Python） |
 | 🔌 **Skills 系统** | 可插拔技能包（investment/memory/system/task_management），支持自定义技能目录 |
 | 🌐 **MCP 联邦** | JSON-RPC 2.0 连接外部 MCP 服务器，自动注册其工具到 Agent |
+| 🔄 **协议兼容** | 支持 MCP Server 模式（暴露工具给外部 Agent）、OpenAI function calling 格式双向转换 |
 | 👥 **多用户隔离** | `multi_user_mode` 按 Bearer Token 哈希隔离用户 session |
 | ⏰ **定时任务** | APScheduler 调度，支持 cron 表达式和一次性任务 |
 | 💾 **本地存储** | SQLite（aiosqlite），自选股/持仓数据永远不离本机 |
@@ -471,7 +472,7 @@ skills_dir: "./xclaw.data/skills"
 
 XClaw 支持通过 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 连接外部工具服务器，自动将其工具注册到 Agent 中。
 
-### 配置 MCP 服务器
+### 配置 MCP 客户端（连接外部 MCP 服务器）
 
 ```yaml
 mcp_servers:
@@ -489,6 +490,23 @@ XClaw 在启动时：
 3. 将每个工具包装为 `MCPToolAdapter` 注册到 ToolRegistry
 4. AI 调用工具时转发 `tools/call` 请求
 
+### MCP Server 模式（将 XClaw 工具暴露给外部客户端）
+
+启用 `mcp_server_enabled` 后，XClaw 在 `/mcp` 端点提供标准 MCP 服务，
+其他 MCP 兼容客户端（如 Claude Desktop、其他 Agent 框架）可以发现并调用 XClaw 注册的工具。
+
+```yaml
+mcp_server_enabled: true   # 在 /mcp 端点暴露 MCP 服务
+```
+
+MCP Server 遵循 MCP `2024-11-05` 版本协议，支持以下方法：
+
+| 方法 | 说明 |
+|------|------|
+| `initialize` | 协议握手，返回版本和能力声明 |
+| `tools/list` | 列出所有可用工具（自动排除高风险工具）|
+| `tools/call` | 调用指定工具并返回结果 |
+
 ### MCP 服务器接口规范
 
 XClaw 遵循 MCP 协议 `2024-11-05` 版本，服务器需实现：
@@ -498,6 +516,52 @@ POST / (Content-Type: application/json)
   - initialize      → {"result": {"protocolVersion": ..., "capabilities": {}}}
   - tools/list      → {"result": {"tools": [{"name": "...", "description": "...", "inputSchema": {...}}]}}
   - tools/call      → {"result": {"content": [{"type": "text", "text": "..."}], "isError": false}}
+```
+
+---
+
+## 协议兼容性
+
+XClaw 的 Skills 系统兼容以下开放标准协议：
+
+| 协议 | 支持方式 | 说明 |
+|------|----------|------|
+| **MCP (Model Context Protocol)** | 客户端 + 服务端 | 连接外部 MCP 服务器 / 将工具暴露为 MCP 服务 |
+| **OpenAI Function Calling** | 格式转换 | `ToolDefinition.to_openai_function()` / `from_openai_function()` 双向转换 |
+| **JSON Schema** | 原生支持 | 工具参数定义使用标准 JSON Schema |
+
+### OpenAI Function Calling 格式转换
+
+```python
+from xclaw.llm_types import ToolDefinition
+
+# XClaw → OpenAI 格式
+td = ToolDefinition(name="search", description="搜索", input_schema={...})
+openai_format = td.to_openai_function()
+# → {"type": "function", "function": {"name": "search", ...}}
+
+# OpenAI → XClaw 格式
+td = ToolDefinition.from_openai_function(openai_format)
+
+# XClaw → MCP 格式
+mcp_format = td.to_mcp_tool()
+# → {"name": "search", "description": "搜索", "inputSchema": {...}}
+
+# MCP → XClaw 格式
+td = ToolDefinition.from_mcp_tool(mcp_format)
+```
+
+### ToolRegistry 批量导出
+
+```python
+# 导出所有工具为 OpenAI 格式
+openai_tools = registry.get_openai_definitions()
+
+# 导出所有工具为 MCP 格式
+mcp_tools = registry.get_mcp_definitions()
+
+# 排除高风险工具
+safe_tools = registry.get_openai_definitions(exclude_high_risk=True)
 ```
 
 ---

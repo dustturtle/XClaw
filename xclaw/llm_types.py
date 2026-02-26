@@ -63,6 +63,58 @@ class ToolDefinition(BaseModel):
     description: str
     input_schema: dict[str, Any]
 
+    def to_openai_function(self) -> dict[str, Any]:
+        """Export as an OpenAI function-calling tool definition.
+
+        Returns a dict compatible with ``{"type": "function", "function": {...}}``.
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+    def to_mcp_tool(self) -> dict[str, Any]:
+        """Export as an MCP ``tools/list`` tool entry.
+
+        Returns a dict with ``name``, ``description``, and ``inputSchema``
+        conforming to the Model Context Protocol specification.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_schema,
+        }
+
+    @classmethod
+    def from_openai_function(cls, data: dict[str, Any]) -> "ToolDefinition":
+        """Create a ToolDefinition from an OpenAI function-calling tool dict.
+
+        Accepts either ``{"type": "function", "function": {...}}`` (full format)
+        or the inner ``{"name": ..., "description": ..., "parameters": ...}`` dict.
+        """
+        fn = data.get("function", data)
+        return cls(
+            name=fn["name"],
+            description=fn.get("description", ""),
+            input_schema=fn.get("parameters", {"type": "object", "properties": {}}),
+        )
+
+    @classmethod
+    def from_mcp_tool(cls, data: dict[str, Any]) -> "ToolDefinition":
+        """Create a ToolDefinition from an MCP tool entry dict.
+
+        Accepts ``{"name": ..., "description": ..., "inputSchema": ...}``.
+        """
+        return cls(
+            name=data["name"],
+            description=data.get("description", ""),
+            input_schema=data.get("inputSchema", {"type": "object", "properties": {}}),
+        )
+
 
 # ── LLM Response ─────────────────────────────────────────────────────────────
 

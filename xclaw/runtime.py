@@ -171,6 +171,7 @@ async def run(settings: Settings) -> None:
             db=db,
             settings=settings,
             multi_user_mode=settings.multi_user_mode,
+            tool_registry=tools,
         )
         # Register webhook adapters using isinstance checks for safety
         if settings.feishu_enabled:
