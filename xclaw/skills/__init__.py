@@ -245,9 +245,28 @@ def _load_skills_from_dir(
     skills_dir: Path,
     requested_names: list[str],
 ) -> None:
-    """Scan *skills_dir* for .py files and load matching Skill subclasses."""
+    """Scan *skills_dir* for ``.py`` and ``.yaml`` files and load Skill instances."""
     if not skills_dir.is_dir():
         return
+
+    # ── YAML skill files ──────────────────────────────────────────────────
+    for yaml_file in sorted(skills_dir.glob("*.yaml")):
+        stem = yaml_file.stem
+        if stem.startswith("_"):
+            continue
+        if requested_names != _ALL_BUILTIN_NAMES and stem not in requested_names:
+            continue
+        from xclaw.skills.yaml_skill import load_yaml_skill
+
+        skill = load_yaml_skill(yaml_file)
+        if skill is not None:
+            try:
+                registry.register(skill)
+                logger.info(f"YAML skill '{skill.name}' loaded from {yaml_file}")
+            except ValueError:
+                pass
+
+    # ── Python skill files ────────────────────────────────────────────────
     for py_file in sorted(skills_dir.glob("*.py")):
         stem = py_file.stem
         if stem.startswith("_"):

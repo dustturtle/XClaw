@@ -430,9 +430,126 @@ enabled_skills:
 skills_dir: "./xclaw.data/skills"
 ```
 
-### 编写自定义技能
+### 用 YAML 编写自定义技能（推荐）
 
-在 `skills_dir` 目录下创建 `.py` 文件：
+无需编写 Python 代码，只需在 `skills_dir` 目录下创建 `.yaml` 文件即可定义新技能：
+
+```yaml
+# xclaw.data/skills/weather.yaml
+name: weather
+description: "天气查询工具包"
+tools:
+  - name: get_weather
+    description: "获取指定城市的当前天气"
+    parameters:
+      type: object
+      properties:
+        city:
+          type: string
+          description: "城市名"
+      required: [city]
+    http:
+      method: GET
+      url: "https://api.weatherapi.com/v1/current.json"
+      query:
+        key: "$WEATHER_API_KEY"
+        q: "{{city}}"
+      headers:
+        User-Agent: "XClaw/0.1"
+      response_path: "current.condition.text"
+```
+
+#### YAML 技能文件格式
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 技能唯一名称，用于 `enabled_skills` 列表 |
+| `description` | 技能描述 |
+| `tools` | 工具列表 |
+| `tools[].name` | 工具名称（Agent 调用时使用）|
+| `tools[].description` | 工具描述（AI 参考）|
+| `tools[].parameters` | JSON Schema 格式的参数定义 |
+| `tools[].http.method` | HTTP 方法（GET/POST/PUT/DELETE，默认 GET）|
+| `tools[].http.url` | 请求 URL（支持模板变量）|
+| `tools[].http.query` | URL 查询参数 |
+| `tools[].http.headers` | 请求头 |
+| `tools[].http.body` | POST/PUT 请求体（JSON 对象）|
+| `tools[].http.response_path` | 从 JSON 响应中提取数据的路径（如 `results.0.text`）|
+| `tools[].http.timeout` | 请求超时秒数（默认 20）|
+| `tools[].http.max_chars` | 最大返回字符数（默认 8000）|
+
+#### 模板变量语法
+
+- `{{param_name}}` – 替换为工具调用时的参数值
+- `$ENV_VAR` – 替换为环境变量值（适合存放 API Key 等敏感信息）
+
+#### 更多 YAML 技能示例
+
+**POST 请求 + JSON Body：**
+
+```yaml
+name: notification
+description: "通知推送工具"
+tools:
+  - name: send_notification
+    description: "发送通知消息"
+    parameters:
+      type: object
+      properties:
+        title:
+          type: string
+          description: "通知标题"
+        message:
+          type: string
+          description: "通知内容"
+      required: [title, message]
+    http:
+      method: POST
+      url: "https://api.example.com/notify"
+      headers:
+        Authorization: "Bearer $NOTIFY_TOKEN"
+      body:
+        title: "{{title}}"
+        text: "{{message}}"
+```
+
+### 导入别人的技能
+
+可以通过 URL 直接安装别人分享的 YAML 技能文件：
+
+```bash
+# 从 URL 安装技能
+xclaw skill install https://example.com/skills/weather.yaml
+
+# 从 GitHub 安装（使用 raw 文件地址）
+xclaw skill install https://raw.githubusercontent.com/user/xclaw-skills/main/weather.yaml
+```
+
+安装后需在 `enabled_skills` 中启用：
+
+```yaml
+enabled_skills:
+  - all
+  - weather
+skills_dir: "./xclaw.data/skills"
+```
+
+### 技能管理命令
+
+```bash
+# 查看所有技能（内置 + 自定义）
+xclaw skill list
+
+# 安装远程技能
+xclaw skill install <url>
+
+# 删除自定义技能
+xclaw skill remove <name>
+```
+
+### 用 Python 编写自定义技能
+
+对于需要复杂逻辑的技能，仍然可以在 `skills_dir` 目录下创建 `.py` 文件：
 
 ```python
 # xclaw.data/skills/my_crm.py
