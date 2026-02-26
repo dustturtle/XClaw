@@ -37,7 +37,8 @@ from xclaw.tools.stock_quote import StockQuoteTool
 from xclaw.tools.watchlist import WatchlistManageTool
 from xclaw.tools.web_fetch import WebFetchTool
 from xclaw.tools.web_search import WebSearchTool
-
+from xclaw.tools.bash_tool import BashTool
+from xclaw.tools.sub_agent import SubAgentTool
 
 def _setup_logging(settings: Settings) -> None:
     settings.logs_path.mkdir(parents=True, exist_ok=True)
@@ -72,6 +73,10 @@ def _build_tool_registry(settings: Settings) -> ToolRegistry:
     registry.register(WatchlistManageTool())
     registry.register(PortfolioManageTool())
     registry.register(MarketOverviewTool())
+    # Optional tools
+    if settings.bash_enabled:
+        registry.register(BashTool())
+    registry.register(SubAgentTool(registry))
     return registry
 
 
@@ -113,6 +118,16 @@ async def run(settings: Settings) -> None:
             settings=settings,
         )
         return await agent_loop(ctx, text)
+
+    # ── Task scheduler ────────────────────────────────────────────────────────
+    from xclaw.scheduler import TaskScheduler
+
+    scheduler = TaskScheduler(
+        message_handler=handle_message,
+        db=db,
+        timezone=settings.timezone,
+    )
+    scheduler.start()
 
     # ── Start channel adapters ────────────────────────────────────────────────
     adapters = []
@@ -165,6 +180,8 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "web"),
             auth_token=settings.web_auth_token,
             rate_limit=settings.rate_limit_per_minute,
+            db=db,
+            settings=settings,
         )
         # Register webhook adapters
         if settings.feishu_enabled:
@@ -181,6 +198,7 @@ async def run(settings: Settings) -> None:
         await server.serve()
 
     # Cleanup
+    scheduler.stop()
     await db.close()
     for adapter in adapters:
         await adapter.stop()
