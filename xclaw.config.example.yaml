@@ -79,3 +79,8 @@ enabled_skills:
 #     timeout: 10
 mcp_servers: []
 
+# ── MCP Server 模式（将 XClaw 工具暴露为 MCP 服务）────────────────────────────
+# 启用后，其他 MCP 客户端（Claude Desktop、其他 Agent 等）可通过 /mcp 端点
+# 发现并调用 XClaw 注册的工具。协议: JSON-RPC 2.0, MCP 2024-11-05
+mcp_server_enabled: false
+
