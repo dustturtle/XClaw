@@ -156,6 +156,16 @@ async def run(settings: Settings) -> None:
         )
         adapters.append(wechat_mp)
 
+    if settings.qq_enabled:
+        from xclaw.channels.qq import QQAdapter
+
+        qq = QQAdapter(
+            app_id=settings.qq_app_id,
+            app_secret=settings.qq_app_secret,
+            message_handler=lambda cid, text: handle_message(cid, text, "qq"),
+        )
+        adapters.append(qq)
+
     # Start all adapters
     for adapter in adapters:
         await adapter.start()
@@ -185,6 +195,12 @@ async def run(settings: Settings) -> None:
             for adapter in adapters:
                 if isinstance(adapter, WeChatMPAdapter):
                     web_app.state.set_wechat_mp_adapter(adapter)
+                    break
+        if settings.qq_enabled:
+            from xclaw.channels.qq import QQAdapter
+            for adapter in adapters:
+                if isinstance(adapter, QQAdapter):
+                    web_app.state.set_qq_adapter(adapter)
                     break
 
         config = uvicorn.Config(
