@@ -16,6 +16,7 @@ from xclaw.tools.stock_history import StockHistoryTool
 from xclaw.tools.stock_indicators import StockIndicatorsTool
 from xclaw.tools.stock_news import StockNewsTool
 from xclaw.tools.stock_quote import StockQuoteTool
+from xclaw.tools.stock_zt_pool import StockZTPoolTool
 from xclaw.tools.watchlist import WatchlistManageTool
 
 
@@ -169,3 +170,98 @@ async def test_stock_news():
         result = await tool.execute({"symbol": "600519", "limit": 5}, _ctx())
     assert not result.is_error
     assert "贵州茅台" in result.content
+
+
+# ── stock_zt_pool ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stock_zt_pool_success():
+    """stock_zt_pool tool should return formatted limit-up stock pool data."""
+    mock_df = pd.DataFrame([
+        {
+            "序号": 1, "代码": "000001", "名称": "平安银行", "涨跌幅": 10.0,
+            "最新价": 12.5, "成交额": 5e8, "流通市值": 2e10, "总市值": 2.5e10,
+            "换手率": 3.5, "封板资金": 1e8, "首次封板时间": "093500",
+            "最后封板时间": "140000", "炸板次数": 1, "涨停统计": "3/5",
+            "连板数": 2, "所属行业": "银行",
+        },
+        {
+            "序号": 2, "代码": "600100", "名称": "同方股份", "涨跌幅": 10.0,
+            "最新价": 8.2, "成交额": 3e8, "流通市值": 1e10, "总市值": 1.2e10,
+            "换手率": 5.0, "封板资金": 5e7, "首次封板时间": "100000",
+            "最后封板时间": "143000", "炸板次数": 0, "涨停统计": "1/3",
+            "连板数": 1, "所属行业": "电子",
+        },
+    ])
+    with patch("akshare.stock_zt_pool_em", return_value=mock_df):
+        tool = StockZTPoolTool()
+        result = await tool.execute({"date": "20250227", "limit": 10}, _ctx())
+    assert not result.is_error
+    assert "平安银行" in result.content
+    assert "000001" in result.content
+    assert "银行" in result.content
+    assert "涨停板股票池" in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_zt_pool_sort_by_price():
+    """When sort_by_price=True, lower-priced stocks should come first."""
+    mock_df = pd.DataFrame([
+        {
+            "序号": 1, "代码": "600100", "名称": "高价股", "涨跌幅": 10.0,
+            "最新价": 50.0, "成交额": 3e8, "流通市值": 1e10, "总市值": 1.2e10,
+            "换手率": 5.0, "封板资金": 5e7, "首次封板时间": "100000",
+            "最后封板时间": "143000", "炸板次数": 0, "涨停统计": "1/3",
+            "连板数": 1, "所属行业": "电子",
+        },
+        {
+            "序号": 2, "代码": "000001", "名称": "低价股", "涨跌幅": 10.0,
+            "最新价": 5.0, "成交额": 5e8, "流通市值": 2e10, "总市值": 2.5e10,
+            "换手率": 3.5, "封板资金": 1e8, "首次封板时间": "093500",
+            "最后封板时间": "140000", "炸板次数": 1, "涨停统计": "3/5",
+            "连板数": 2, "所属行业": "银行",
+        },
+    ])
+    with patch("akshare.stock_zt_pool_em", return_value=mock_df):
+        tool = StockZTPoolTool()
+        result = await tool.execute(
+            {"date": "20250227", "sort_by_price": True, "limit": 5}, _ctx()
+        )
+    assert not result.is_error
+    # 低价股 should appear before 高价股 in the output
+    low_idx = result.content.index("低价股")
+    high_idx = result.content.index("高价股")
+    assert low_idx < high_idx
+
+
+@pytest.mark.asyncio
+async def test_stock_zt_pool_empty():
+    """When no data is returned, should give informative message."""
+    with patch("akshare.stock_zt_pool_em", return_value=pd.DataFrame()):
+        tool = StockZTPoolTool()
+        result = await tool.execute({"date": "20250101"}, _ctx())
+    assert not result.is_error
+    assert "未找到" in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_zt_pool_default_date():
+    """When no date is provided, should use today's date."""
+    mock_df = pd.DataFrame([
+        {
+            "序号": 1, "代码": "000001", "名称": "平安银行", "涨跌幅": 10.0,
+            "最新价": 12.5, "成交额": 5e8, "流通市值": 2e10, "总市值": 2.5e10,
+            "换手率": 3.5, "封板资金": 1e8, "首次封板时间": "093500",
+            "最后封板时间": "140000", "炸板次数": 1, "涨停统计": "3/5",
+            "连板数": 2, "所属行业": "银行",
+        },
+    ])
+    with patch("akshare.stock_zt_pool_em", return_value=mock_df) as mock_fn:
+        tool = StockZTPoolTool()
+        result = await tool.execute({}, _ctx())
+    assert not result.is_error
+    # Verify akshare was called with a date string (today's date)
+    call_args = mock_fn.call_args
+    date_arg = call_args[1].get("date") if call_args[1] else call_args[0][0] if call_args[0] else None
+    # The date should be set (not empty)
+    assert date_arg is not None and len(date_arg) == 8
