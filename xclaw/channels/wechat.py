@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import html
 import hashlib
 import json
 import re
@@ -302,38 +301,8 @@ class LoginAttemptStore:
 
 
 def render_qr_svg(content: str) -> str:
-    safe_content = html.escape(content, quote=True)
-    if content.startswith(("http://", "https://", "data:image/")):
-        return (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="280" height="280" '
-            'viewBox="0 0 280 280">'
-            '<rect width="280" height="280" rx="20" fill="#ffffff"/>'
-            '<foreignObject x="16" y="16" width="248" height="248">'
-            '<div xmlns="http://www.w3.org/1999/xhtml" '
-            'style="width:248px;height:248px;display:flex;align-items:center;'
-            'justify-content:center;background:#fff;">'
-            f'<img src="{safe_content}" alt="WeChat QR Code" '
-            'style="max-width:100%;max-height:100%;" />'
-            "</div>"
-            "</foreignObject>"
-            "</svg>"
-        )
-
-    try:
-        from qrcode import QRCode
-        from qrcode.image.svg import SvgPathImage
-    except ImportError:
-        display = html.escape(content[:80], quote=False)
-        return (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="160" '
-            'viewBox="0 0 320 160">'
-            '<rect width="320" height="160" rx="16" fill="#ffffff" stroke="#d9d9d9"/>'
-            '<text x="20" y="46" font-size="16" fill="#333333">二维码内容已获取</text>'
-            '<text x="20" y="78" font-size="12" fill="#666666">当前环境缺少 qrcode 依赖，</text>'
-            '<text x="20" y="98" font-size="12" fill="#666666">请补装后生成本地二维码。</text>'
-            f'<text x="20" y="128" font-size="10" fill="#888888">{display}</text>'
-            "</svg>"
-        )
+    from qrcode import QRCode
+    from qrcode.image.svg import SvgPathImage
 
     qr = QRCode(border=2)
     qr.add_data(content)

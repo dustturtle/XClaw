@@ -27,6 +27,8 @@ def test_defaults():
     assert s.wecom_enabled is False
     assert s.dingtalk_enabled is False
     assert s.wechat_enabled is False
+    assert s.wechat_invite_refresh_seconds == 45
+    assert s.wechat_invite_session_total_timeout_seconds == 90
 
 
 def test_load_from_yaml(tmp_path: Path):

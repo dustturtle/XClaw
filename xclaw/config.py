@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     wechat_qr_poll_interval_seconds: int = 1
     wechat_poll_timeout_ms: int = 25_000
     wechat_max_reply_chars: int = 1_500
+    wechat_invite_refresh_seconds: int = 45
+    wechat_invite_session_total_timeout_seconds: int = 90
 
     # ── WeChat Official Account / Mini Program (微信公众号 / 小程序) ──────────
     wechat_mp_enabled: bool = False

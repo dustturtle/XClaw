@@ -272,6 +272,8 @@ wechat_qr_poll_timeout_seconds: 35
 wechat_qr_poll_interval_seconds: 1
 wechat_poll_timeout_ms: 25000
 wechat_max_reply_chars: 1500
+wechat_invite_refresh_seconds: 45
+wechat_invite_session_total_timeout_seconds: 90
 ```
 
 常用接口：
@@ -281,6 +283,20 @@ wechat_max_reply_chars: 1500
 - `GET /api/auth/wechat/session`：查看当前是否已绑定微信 Bot
 - `POST /api/auth/wechat/logout`：清除当前绑定
 - `GET /api/wechat/bot/status`：查看轮询状态与最近错误
+
+多租户邀请接口：
+
+- `POST /api/admin/tenants`：创建租户
+- `POST /api/admin/tenants/{tenant_id}/invite-links`：创建租户邀请链接
+- `GET /api/admin/tenants/{tenant_id}`：查看租户摘要
+- `GET /api/admin/tenants/{tenant_id}/members`：查看已绑定成员
+- `POST /api/admin/invite-links/{link_id}/disable`：停用邀请链接
+- `GET /invite/{public_token}`：公开邀请页
+- `POST /api/invite/{public_token}/sessions`：开始一次扫码绑定会话
+- `POST /api/invite/sessions/{invite_session_id}/refresh`：刷新二维码
+- `GET /api/invite/sessions/{invite_session_id}`：查询绑定状态
+
+说明：管理端接口沿用 XClaw 现有的 `web_auth_token` 鉴权；公开邀请页和 invite session 轮询接口不需要管理员鉴权。
 
 ### 微信公众号（WeChat Official Account）
 
@@ -358,6 +374,14 @@ wx.request({
 | `GET /api/auth/wechat/session` | GET | ✅ | 查看当前微信 Bot 绑定状态 |
 | `POST /api/auth/wechat/logout` | POST | ✅ | 解除当前微信 Bot 绑定 |
 | `GET /api/wechat/bot/status` | GET | ✅ | 查看微信长轮询运行状态 |
+| `POST /api/admin/tenants` | POST | ✅ | 创建微信多租户 |
+| `POST /api/admin/tenants/{tenant_id}/invite-links` | POST | ✅ | 创建租户邀请链接 |
+| `GET /api/admin/tenants/{tenant_id}` | GET | ✅ | 查询租户摘要 |
+| `GET /api/admin/tenants/{tenant_id}/members` | GET | ✅ | 查询租户成员 |
+| `POST /api/admin/invite-links/{link_id}/disable` | POST | ✅ | 停用邀请链接 |
+| `POST /api/invite/{public_token}/sessions` | POST | 无 | 开始一次公开邀请绑定 |
+| `POST /api/invite/sessions/{invite_session_id}/refresh` | POST | 无 | 刷新邀请二维码 |
+| `GET /api/invite/sessions/{invite_session_id}` | GET | 无 | 查询邀请绑定状态 |
 
 ### Webhook 接口
 
@@ -1143,6 +1167,7 @@ tests/
 ├── test_scheduler.py         # 定时任务
 ├── test_channels.py          # 渠道适配（Feishu/WeCom/DingTalk/QQ/Web）
 ├── test_wechat_ilink.py      # 微信 iLink 二维码登录 / 长轮询 Bot
+├── test_wechat_multitenant.py # 微信多租户邀请 / 成员绑定 / 轮询隔离
 ├── test_wechat.py            # 微信公众号/小程序（24 个测试）
 └── test_phase5.py            # Phase 5 全量测试（65 个测试）
 ```

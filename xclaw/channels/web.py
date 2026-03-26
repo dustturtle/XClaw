@@ -13,6 +13,20 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from xclaw.channels.wechat import IlinkClientError
+from xclaw.channels.wechat_multi_tenant import (
+    CreateInviteLinkRequest,
+    CreateInviteLinkResponse,
+    CreateTenantRequest,
+    CreateTenantResponse,
+    InviteLinkUnavailableError,
+    InviteSessionNotFoundError,
+    InviteSessionStartResponse,
+    InviteSessionStatusPayload,
+    TenantMemberPayload,
+    TenantSummaryPayload,
+    build_invite_page,
+)
 
 # Rate limiting (slowapi)
 try:
@@ -839,6 +853,146 @@ def create_web_app(
         if _wechat_adapter is None:
             raise HTTPException(status_code=503, detail="WeChat adapter not configured")
         return _wechat_adapter.get_public_status()
+
+    # ── WeChat Multi-tenant invite flow ──────────────────────────────────────
+    _wechat_multi_tenant_service: Any = None
+
+    def set_wechat_multi_tenant_service(service: Any) -> None:
+        nonlocal _wechat_multi_tenant_service
+        _wechat_multi_tenant_service = service
+
+    app.state.set_wechat_multi_tenant_service = set_wechat_multi_tenant_service
+
+    @app.get("/invite/{public_token}", response_class=HTMLResponse)
+    async def wechat_invite_page(public_token: str) -> HTMLResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        return HTMLResponse(
+            build_invite_page(public_token),
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
+    @app.post("/api/invite/{public_token}/sessions", response_model=InviteSessionStartResponse)
+    async def start_invite_session(public_token: str) -> InviteSessionStartResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        try:
+            return await _wechat_multi_tenant_service.invites.start_session(public_token)
+        except InviteLinkUnavailableError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/invite/sessions/{invite_session_id}/refresh",
+        response_model=InviteSessionStartResponse,
+    )
+    async def refresh_invite_session(invite_session_id: str) -> InviteSessionStartResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        try:
+            return await _wechat_multi_tenant_service.invites.refresh_session(invite_session_id)
+        except InviteSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/invite/sessions/{invite_session_id}",
+        response_model=InviteSessionStatusPayload,
+    )
+    async def invite_session_status(invite_session_id: str) -> InviteSessionStatusPayload:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        try:
+            return await _wechat_multi_tenant_service.invites.poll_session(invite_session_id)
+        except InviteSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (IlinkClientError, ValueError, KeyError) as exc:
+            updated_row = await _wechat_multi_tenant_service.db.update_invite_session_state(
+                invite_session_id,
+                "error",
+                error=str(exc),
+            )
+            if updated_row is None:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return InviteSessionStatusPayload.model_validate(updated_row)
+
+    @app.post(
+        "/api/admin/tenants",
+        response_model=CreateTenantResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def create_tenant(payload: CreateTenantRequest) -> CreateTenantResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        row = await _wechat_multi_tenant_service.db.create_tenant(payload.name)
+        return CreateTenantResponse.model_validate(row)
+
+    @app.post(
+        "/api/admin/tenants/{tenant_id}/invite-links",
+        response_model=CreateInviteLinkResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def create_invite_link(
+        tenant_id: str,
+        payload: CreateInviteLinkRequest,
+        request: Request,
+    ) -> CreateInviteLinkResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        if await _wechat_multi_tenant_service.db.get_tenant(tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown tenant.")
+        row = await _wechat_multi_tenant_service.db.create_invite_link(
+            tenant_id,
+            max_uses=payload.max_uses,
+            expires_at=payload.expires_at,
+        )
+        base = str(request.base_url).rstrip("/")
+        return CreateInviteLinkResponse(
+            link_id=row["link_id"],
+            tenant_id=row["tenant_id"],
+            public_token=row["public_token"],
+            invite_url=f"{base}/invite/{row['public_token']}",
+            status=row["status"],
+            created_at=row["created_at"],
+        )
+
+    @app.get(
+        "/api/admin/tenants/{tenant_id}",
+        response_model=TenantSummaryPayload,
+        dependencies=[Depends(verify_token)],
+    )
+    async def tenant_summary(tenant_id: str) -> TenantSummaryPayload:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        summary = await _wechat_multi_tenant_service.db.get_tenant_summary(tenant_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Unknown tenant.")
+        return TenantSummaryPayload.model_validate(summary)
+
+    @app.get(
+        "/api/admin/tenants/{tenant_id}/members",
+        response_model=list[TenantMemberPayload],
+        dependencies=[Depends(verify_token)],
+    )
+    async def tenant_members(tenant_id: str) -> list[TenantMemberPayload]:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        if await _wechat_multi_tenant_service.db.get_tenant(tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown tenant.")
+        rows = await _wechat_multi_tenant_service.db.list_tenant_members(tenant_id)
+        return [TenantMemberPayload.model_validate(r) for r in rows]
+
+    @app.post(
+        "/api/admin/invite-links/{link_id}/disable",
+        dependencies=[Depends(verify_token)],
+    )
+    async def disable_invite_link(link_id: str) -> JSONResponse:
+        if _wechat_multi_tenant_service is None:
+            raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+        await _wechat_multi_tenant_service.db.disable_invite_link(link_id)
+        return JSONResponse({"ok": True})
 
     _wechat_mp_adapter: Any = None
 

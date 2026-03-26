@@ -115,6 +115,7 @@ async def run(settings: Settings) -> None:
 
     # ── Start channel adapters ────────────────────────────────────────────────
     adapters = []
+    wechat_multi_tenant = None
 
     if settings.feishu_enabled:
         from xclaw.channels.feishu import FeishuAdapter
@@ -154,6 +155,7 @@ async def run(settings: Settings) -> None:
 
     if settings.wechat_enabled:
         from xclaw.channels.wechat import WeChatAdapter
+        from xclaw.channels.wechat_multi_tenant import WeChatMultiTenantService
 
         wechat = WeChatAdapter(
             base_url=settings.wechat_base_url,
@@ -167,6 +169,16 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "wechat"),
         )
         adapters.append(wechat)
+        wechat_multi_tenant = WeChatMultiTenantService(
+            db=db,
+            base_url=settings.wechat_base_url,
+            qr_poll_interval_seconds=settings.wechat_qr_poll_interval_seconds,
+            invite_refresh_seconds=settings.wechat_invite_refresh_seconds,
+            invite_session_total_timeout_seconds=settings.wechat_invite_session_total_timeout_seconds,
+            poll_timeout_ms=settings.wechat_poll_timeout_ms,
+            max_reply_chars=settings.wechat_max_reply_chars,
+            message_handler=lambda cid, text: handle_message(cid, text, "wechat"),
+        )
 
     if settings.wechat_mp_enabled:
         from xclaw.channels.wechat_mp import WeChatMPAdapter
@@ -193,6 +205,8 @@ async def run(settings: Settings) -> None:
     # Start all adapters
     for adapter in adapters:
         await adapter.start()
+    if wechat_multi_tenant is not None:
+        await wechat_multi_tenant.start()
 
     # ── Web server ────────────────────────────────────────────────────────────
     if settings.web_enabled:
@@ -220,6 +234,8 @@ async def run(settings: Settings) -> None:
                 if isinstance(adapter, WeChatAdapter):
                     web_app.state.set_wechat_adapter(adapter)
                     break
+            if wechat_multi_tenant is not None:
+                web_app.state.set_wechat_multi_tenant_service(wechat_multi_tenant)
         if settings.wechat_mp_enabled:
             from xclaw.channels.wechat_mp import WeChatMPAdapter
             for adapter in adapters:
@@ -245,6 +261,8 @@ async def run(settings: Settings) -> None:
 
     # Cleanup
     scheduler.stop()
+    if wechat_multi_tenant is not None:
+        await wechat_multi_tenant.stop()
     await db.close()
     for adapter in adapters:
         await adapter.stop()

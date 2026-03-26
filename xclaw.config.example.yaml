@@ -48,6 +48,8 @@ wechat_qr_poll_timeout_seconds: 35
 wechat_qr_poll_interval_seconds: 1
 wechat_poll_timeout_ms: 25000
 wechat_max_reply_chars: 1500
+wechat_invite_refresh_seconds: 45
+wechat_invite_session_total_timeout_seconds: 90
 
 # 微信公众号 / 小程序（WeChat Official Account / Mini Program）
 # 需要已认证的服务号 + 公网 HTTPS 域名。详见 docs/wechat-design.md

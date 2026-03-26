@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import secrets
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,7 +92,89 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     output_tokens INTEGER,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invite_links (
+    link_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    public_token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    max_uses INTEGER NULL,
+    expires_at TEXT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS invite_sessions (
+    invite_session_id TEXT PRIMARY KEY,
+    link_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    qrcode TEXT NOT NULL,
+    qr_content TEXT NOT NULL,
+    state TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    bound_member_id TEXT NULL,
+    superseded_by TEXT NULL,
+    error TEXT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (link_id) REFERENCES invite_links(link_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS tenant_members (
+    member_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    ilink_user_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_bound_at TEXT NOT NULL,
+    UNIQUE (tenant_id, ilink_user_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS channel_credentials (
+    credential_id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    bot_token TEXT NOT NULL,
+    ilink_bot_id TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    get_updates_buf TEXT NOT NULL,
+    status TEXT NOT NULL,
+    bound_at TEXT NOT NULL,
+    FOREIGN KEY (member_id) REFERENCES tenant_members(member_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS member_runtime_state (
+    member_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    context_token TEXT NOT NULL,
+    last_poll_at TEXT NULL,
+    last_error TEXT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS message_dedup (
+    tenant_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (credential_id, message_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
+    FOREIGN KEY (credential_id) REFERENCES channel_credentials(credential_id)
+);
 """
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class Database:
@@ -341,6 +425,504 @@ class Database:
             (chat_id, model, input_tokens, output_tokens),
         )
         await self.conn.commit()
+
+    # ── WeChat Multi-tenant Invite Flow ──────────────────────────────────────
+
+    async def create_tenant(self, name: str) -> dict[str, Any]:
+        tenant = {
+            "tenant_id": str(uuid.uuid4()),
+            "name": name.strip(),
+            "status": "active",
+            "created_at": _now_iso(),
+        }
+        await self.conn.execute(
+            "INSERT INTO tenants (tenant_id, name, status, created_at) VALUES (?,?,?,?)",
+            (
+                tenant["tenant_id"],
+                tenant["name"],
+                tenant["status"],
+                tenant["created_at"],
+            ),
+        )
+        await self.conn.commit()
+        return tenant
+
+    async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM tenants WHERE tenant_id = ?",
+            (tenant_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def create_invite_link(
+        self,
+        tenant_id: str,
+        *,
+        max_uses: int | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        link = {
+            "link_id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "public_token": secrets.token_urlsafe(18),
+            "status": "active",
+            "max_uses": max_uses,
+            "expires_at": expires_at,
+            "created_at": _now_iso(),
+        }
+        await self.conn.execute(
+            """
+            INSERT INTO invite_links
+            (link_id, tenant_id, public_token, status, max_uses, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                link["link_id"],
+                link["tenant_id"],
+                link["public_token"],
+                link["status"],
+                link["max_uses"],
+                link["expires_at"],
+                link["created_at"],
+            ),
+        )
+        await self.conn.commit()
+        return link
+
+    async def get_invite_link_by_token(self, public_token: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM invite_links WHERE public_token = ?",
+            (public_token,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def disable_invite_link(self, link_id: str) -> None:
+        await self.conn.execute(
+            "UPDATE invite_links SET status = ? WHERE link_id = ?",
+            ("disabled", link_id),
+        )
+        await self.conn.commit()
+
+    async def create_invite_session(
+        self,
+        *,
+        link_id: str,
+        tenant_id: str,
+        qrcode: str,
+        qr_content: str,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        session = {
+            "invite_session_id": str(uuid.uuid4()),
+            "link_id": link_id,
+            "tenant_id": tenant_id,
+            "qrcode": qrcode,
+            "qr_content": qr_content,
+            "state": "pending",
+            "expires_at": (datetime.now(timezone.utc).timestamp() + ttl_seconds),
+            "bound_member_id": None,
+            "superseded_by": None,
+            "error": None,
+            "created_at": _now_iso(),
+        }
+        expires_at = datetime.fromtimestamp(session["expires_at"], timezone.utc).isoformat()
+        session["expires_at"] = expires_at
+        await self.conn.execute(
+            """
+            INSERT INTO invite_sessions
+            (invite_session_id, link_id, tenant_id, qrcode, qr_content, state, expires_at,
+             bound_member_id, superseded_by, error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session["invite_session_id"],
+                session["link_id"],
+                session["tenant_id"],
+                session["qrcode"],
+                session["qr_content"],
+                session["state"],
+                session["expires_at"],
+                session["bound_member_id"],
+                session["superseded_by"],
+                session["error"],
+                session["created_at"],
+            ),
+        )
+        await self.conn.commit()
+        return session
+
+    async def refresh_invite_session(
+        self,
+        invite_session_id: str,
+        *,
+        qrcode: str,
+        qr_content: str,
+        ttl_seconds: int,
+    ) -> dict[str, Any] | None:
+        current = await self.get_invite_session(invite_session_id)
+        if current is None:
+            return None
+        new_session = await self.create_invite_session(
+            link_id=current["link_id"],
+            tenant_id=current["tenant_id"],
+            qrcode=qrcode,
+            qr_content=qr_content,
+            ttl_seconds=ttl_seconds,
+        )
+        await self.update_invite_session_state(
+            invite_session_id,
+            "superseded",
+            superseded_by=new_session["invite_session_id"],
+        )
+        return new_session
+
+    async def get_invite_session(self, invite_session_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM invite_sessions WHERE invite_session_id = ?",
+            (invite_session_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def update_invite_session_state(
+        self,
+        invite_session_id: str,
+        state: str,
+        *,
+        error: str | None = None,
+        bound_member_id: str | None = None,
+        superseded_by: str | None = None,
+    ) -> dict[str, Any] | None:
+        await self.conn.execute(
+            """
+            UPDATE invite_sessions
+            SET state = ?, error = COALESCE(?, error), bound_member_id = COALESCE(?, bound_member_id),
+                superseded_by = COALESCE(?, superseded_by)
+            WHERE invite_session_id = ?
+            """,
+            (
+                state,
+                error,
+                bound_member_id,
+                superseded_by,
+                invite_session_id,
+            ),
+        )
+        await self.conn.commit()
+        return await self.get_invite_session(invite_session_id)
+
+    async def bind_invite_session(
+        self,
+        invite_session_id: str,
+        *,
+        ilink_user_id: str,
+        bot_token: str,
+        ilink_bot_id: str,
+        default_base_url: str,
+        base_url: str = "",
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        session = await self.get_invite_session(invite_session_id)
+        if session is None:
+            raise KeyError(f"Unknown invite session: {invite_session_id}")
+
+        tenant_id = session["tenant_id"]
+        now = _now_iso()
+        resolved_base_url = base_url.strip() or default_base_url
+
+        if not ilink_user_id.strip() or not bot_token.strip() or not ilink_bot_id.strip():
+            raise ValueError("Confirmed invite session did not return complete iLink credentials.")
+
+        async with self.conn.execute(
+            """
+            SELECT * FROM tenant_members
+            WHERE tenant_id = ? AND ilink_user_id = ?
+            """,
+            (tenant_id, ilink_user_id.strip()),
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row:
+            member_id = row["member_id"]
+            await self.conn.execute(
+                """
+                UPDATE tenant_members
+                SET last_bound_at = ?, status = ?
+                WHERE member_id = ?
+                """,
+                (now, "active", member_id),
+            )
+        else:
+            member_id = str(uuid.uuid4())
+            await self.conn.execute(
+                """
+                INSERT INTO tenant_members
+                (member_id, tenant_id, ilink_user_id, status, created_at, last_bound_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    member_id,
+                    tenant_id,
+                    ilink_user_id.strip(),
+                    "active",
+                    now,
+                    now,
+                ),
+            )
+
+        await self.conn.execute(
+            """
+            UPDATE channel_credentials
+            SET status = ?
+            WHERE member_id = ? AND status = ?
+            """,
+            ("inactive", member_id, "active"),
+        )
+
+        credential_id = str(uuid.uuid4())
+        await self.conn.execute(
+            """
+            INSERT INTO channel_credentials
+            (credential_id, member_id, tenant_id, bot_token, ilink_bot_id, base_url,
+             get_updates_buf, status, bound_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                credential_id,
+                member_id,
+                tenant_id,
+                bot_token.strip(),
+                ilink_bot_id.strip(),
+                resolved_base_url,
+                "",
+                "active",
+                now,
+            ),
+        )
+        await self.conn.execute(
+            """
+            INSERT INTO member_runtime_state
+            (member_id, tenant_id, context_token, last_poll_at, last_error)
+            VALUES (?, ?, '', NULL, NULL)
+            ON CONFLICT(member_id) DO NOTHING
+            """,
+            (member_id, tenant_id),
+        )
+        await self.conn.execute(
+            """
+            UPDATE invite_sessions
+            SET state = ?, bound_member_id = ?
+            WHERE invite_session_id = ?
+            """,
+            ("confirmed", member_id, invite_session_id),
+        )
+        await self.conn.commit()
+
+        updated_session = await self.get_invite_session(invite_session_id)
+        member = await self.get_member(member_id)
+        credential = await self.get_credential(credential_id)
+        if updated_session is None or member is None or credential is None:
+            raise RuntimeError("Failed to persist invite binding state.")
+        return updated_session, member, credential
+
+    async def get_member(self, member_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM tenant_members WHERE member_id = ?",
+            (member_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_credential(self, credential_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM channel_credentials WHERE credential_id = ?",
+            (credential_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_active_credentials(self) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM channel_credentials WHERE status = ?",
+            ("active",),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_credential_get_updates_buf(
+        self,
+        credential_id: str,
+        get_updates_buf: str,
+    ) -> None:
+        await self.conn.execute(
+            """
+            UPDATE channel_credentials
+            SET get_updates_buf = ?
+            WHERE credential_id = ?
+            """,
+            (get_updates_buf, credential_id),
+        )
+        await self.conn.commit()
+
+    async def get_runtime_state(
+        self,
+        member_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        async with self.conn.execute(
+            "SELECT * FROM member_runtime_state WHERE member_id = ?",
+            (member_id,),
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row is None:
+            await self.conn.execute(
+                """
+                INSERT INTO member_runtime_state
+                (member_id, tenant_id, context_token, last_poll_at, last_error)
+                VALUES (?, ?, '', NULL, NULL)
+                """,
+                (member_id, tenant_id),
+            )
+            await self.conn.commit()
+            async with self.conn.execute(
+                "SELECT * FROM member_runtime_state WHERE member_id = ?",
+                (member_id,),
+            ) as cur:
+                row = await cur.fetchone()
+
+        if row is None:
+            raise RuntimeError(f"Failed to load runtime state for member_id={member_id}")
+        return dict(row)
+
+    async def update_runtime_state(
+        self,
+        member_id: str,
+        *,
+        tenant_id: str,
+        context_token: str | None = None,
+        last_poll_at: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        current = await self.get_runtime_state(member_id, tenant_id)
+        await self.conn.execute(
+            """
+            UPDATE member_runtime_state
+            SET context_token = ?, last_poll_at = ?, last_error = ?
+            WHERE member_id = ?
+            """,
+            (
+                context_token if context_token is not None else current["context_token"],
+                last_poll_at if last_poll_at is not None else current["last_poll_at"],
+                last_error,
+                member_id,
+            ),
+        )
+        await self.conn.commit()
+
+    async def has_seen_message(self, credential_id: str, message_id: str) -> bool:
+        async with self.conn.execute(
+            """
+            SELECT 1 FROM message_dedup
+            WHERE credential_id = ? AND message_id = ?
+            """,
+            (credential_id, message_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return row is not None
+
+    async def remember_message(
+        self,
+        *,
+        tenant_id: str,
+        credential_id: str,
+        message_id: str,
+        keep_last: int = 200,
+    ) -> None:
+        now = _now_iso()
+        await self.conn.execute(
+            """
+            INSERT OR IGNORE INTO message_dedup
+            (tenant_id, credential_id, message_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (tenant_id, credential_id, message_id, now),
+        )
+        await self.conn.execute(
+            """
+            DELETE FROM message_dedup
+            WHERE rowid IN (
+                SELECT rowid
+                FROM message_dedup
+                WHERE credential_id = ?
+                ORDER BY created_at DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (credential_id, keep_last),
+        )
+        await self.conn.commit()
+
+    async def get_tenant_summary(self, tenant_id: str) -> dict[str, Any] | None:
+        tenant = await self.get_tenant(tenant_id)
+        if tenant is None:
+            return None
+
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS c FROM invite_links WHERE tenant_id = ?",
+            (tenant_id,),
+        ) as cur:
+            invite_link_count = (await cur.fetchone())["c"]
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS c FROM tenant_members WHERE tenant_id = ?",
+            (tenant_id,),
+        ) as cur:
+            member_count = (await cur.fetchone())["c"]
+        async with self.conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM channel_credentials
+            WHERE tenant_id = ? AND status = ?
+            """,
+            (tenant_id, "active"),
+        ) as cur:
+            active_credential_count = (await cur.fetchone())["c"]
+
+        return {
+            "tenant_id": tenant["tenant_id"],
+            "name": tenant["name"],
+            "status": tenant["status"],
+            "invite_link_count": invite_link_count,
+            "member_count": member_count,
+            "active_credential_count": active_credential_count,
+        }
+
+    async def list_tenant_members(self, tenant_id: str) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            """
+            SELECT
+                m.member_id,
+                m.tenant_id,
+                m.ilink_user_id,
+                m.status,
+                c.ilink_bot_id AS current_ilink_bot_id,
+                c.status AS credential_status,
+                r.last_poll_at,
+                r.last_error,
+                m.created_at,
+                m.last_bound_at
+            FROM tenant_members m
+            LEFT JOIN channel_credentials c
+                ON c.member_id = m.member_id AND c.status = ?
+            LEFT JOIN member_runtime_state r
+                ON r.member_id = m.member_id
+            WHERE m.tenant_id = ?
+            ORDER BY m.created_at ASC
+            """,
+            ("active", tenant_id),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
 
 @asynccontextmanager
