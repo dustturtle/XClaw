@@ -15,6 +15,10 @@ def test_defaults():
     """Settings should have correct defaults without any config file."""
     s = Settings()
     assert s.llm_provider == "anthropic"
+    assert s.base_url == ""
+    assert s.temperature is None
+    assert s.timeout == 120.0
+    assert s.thinking is None
     assert s.web_enabled is True
     assert s.web_host == "127.0.0.1"
     assert s.web_port == 8080
@@ -22,6 +26,7 @@ def test_defaults():
     assert s.feishu_enabled is False
     assert s.wecom_enabled is False
     assert s.dingtalk_enabled is False
+    assert s.wechat_enabled is False
 
 
 def test_load_from_yaml(tmp_path: Path):
@@ -31,6 +36,10 @@ def test_load_from_yaml(tmp_path: Path):
         textwrap.dedent("""
             llm_provider: openai
             model: gpt-4o
+            base_url: https://example.com/v1
+            temperature: 0.1
+            timeout: 240.0
+            thinking: true
             web_port: 9090
             bash_enabled: false
         """),
@@ -39,8 +48,28 @@ def test_load_from_yaml(tmp_path: Path):
     s = load_settings(config_file)
     assert s.llm_provider == "openai"
     assert s.model == "gpt-4o"
+    assert s.base_url == "https://example.com/v1"
+    assert s.temperature == 0.1
+    assert s.timeout == 240.0
+    assert s.thinking is True
     assert s.web_port == 9090
     assert s.bash_enabled is False
+
+
+def test_invalid_temperature():
+    """An invalid temperature should raise a ValidationError."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(temperature=2.5)
+
+
+def test_invalid_timeout():
+    """A non-positive timeout should raise a ValidationError."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(timeout=0)
 
 
 def test_load_from_yaml_missing_file():
@@ -72,6 +101,8 @@ def test_data_paths():
     assert s.db_path == Path("/tmp/xclaw_test/xclaw.db")
     assert s.logs_path == Path("/tmp/xclaw_test/logs")
     assert s.groups_path == Path("/tmp/xclaw_test/groups")
+    assert s.wechat_account_path == Path("/tmp/xclaw_test/wechat_account.json")
+    assert s.wechat_state_path == Path("/tmp/xclaw_test/wechat_state.json")
 
 
 def test_env_override(monkeypatch):

@@ -14,6 +14,7 @@ from xclaw.agent_engine import (
     _build_system_prompt,
     _messages_from_serializable,
     _messages_to_serializable,
+    _normalize_final_text,
     agent_loop,
 )
 from xclaw.db import Database
@@ -247,3 +248,32 @@ def test_build_system_prompt_includes_memories():
     prompt = _build_system_prompt(ctx, memories=memories, file_memory_content="# Notes\n- 关注新能源")
     assert "价值投资" in prompt
     assert "关注新能源" in prompt
+
+
+def test_normalize_final_text_fallback():
+    assert _normalize_final_text("") == "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
+    assert _normalize_final_text("有内容") == "有内容"
+
+
+@pytest.mark.asyncio
+async def test_empty_end_turn_reply_uses_fallback(db: Database, tmp_path: Path):
+    chat_id = await db.get_or_create_chat("web", "empty_reply_user")
+    llm = MockLLMProvider([
+        LLMResponse(
+            stop_reason=StopReason.end_turn,
+            content=[],
+        )
+    ])
+    ctx = AgentContext(
+        chat_id=chat_id,
+        channel="web",
+        db=db,
+        llm=llm,
+        tools=ToolRegistry(),
+        file_memory=FileMemory(tmp_path / "groups"),
+        structured_memory=StructuredMemory(db),
+    )
+
+    reply = await agent_loop(ctx, "测试空回复")
+
+    assert reply == "抱歉，这一轮没有生成可展示的答复，请稍后重试。"

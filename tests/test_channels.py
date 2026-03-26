@@ -360,6 +360,24 @@ def test_web_health():
     assert resp.json()["status"] == "ok"
 
 
+def test_web_root_chat_page():
+    app = _make_web_app()
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "XClaw" in resp.text
+    assert "/api/chat" in resp.text
+
+
+def test_web_root_chat_page_mentions_auth_when_enabled():
+    app = _make_web_app(auth_token="secret123")
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Bearer Token" in resp.text
+
+
 def test_web_chat_endpoint():
     app = _make_web_app()
     client = TestClient(app)

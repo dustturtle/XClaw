@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -197,7 +198,7 @@ class DocSkillTool(Tool):
         args_str = params.get("args", "").strip()
         cmd: list[str]
         if filename.endswith(".py"):
-            cmd = ["python", str(script_path)]
+            cmd = [sys.executable, str(script_path)]
         elif filename.endswith(".sh"):
             cmd = ["bash", str(script_path)]
         else:

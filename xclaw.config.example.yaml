@@ -5,6 +5,10 @@
 llm_provider: "anthropic"          # anthropic | openai | deepseek | ollama
 api_key: ""                        # LLM API Key（也可通过 XCLAW_API_KEY 环境变量设置）
 model: "claude-opus-4-5"
+base_url: ""                       # OpenAI-compatible 自定义网关地址（如火山方舟 / 代理）
+temperature:                       # 可选，OpenAI-compatible 常用；0-2
+timeout: 120.0                     # LLM 请求超时（秒）
+thinking:                          # 可选，支持时启用深度思考模式
 max_tokens: 4096
 max_tool_iterations: 50
 
@@ -35,6 +39,15 @@ dingtalk_enabled: false
 dingtalk_app_key: ""
 dingtalk_app_secret: ""
 dingtalk_robot_code: ""
+
+# 微信（iLink 二维码登录 + 私聊 Bot）
+wechat_enabled: false
+wechat_base_url: "https://ilinkai.weixin.qq.com"
+wechat_qr_total_timeout_seconds: 480
+wechat_qr_poll_timeout_seconds: 35
+wechat_qr_poll_interval_seconds: 1
+wechat_poll_timeout_ms: 25000
+wechat_max_reply_chars: 1500
 
 # 微信公众号 / 小程序（WeChat Official Account / Mini Program）
 # 需要已认证的服务号 + 公网 HTTPS 域名。详见 docs/wechat-design.md
@@ -101,4 +114,3 @@ mcp_servers: []
 # 启用后，其他 MCP 客户端（Claude Desktop、其他 Agent 等）可通过 /mcp 端点
 # 发现并调用 XClaw 注册的工具。协议: JSON-RPC 2.0, MCP 2024-11-05
 mcp_server_enabled: false
-
