@@ -64,7 +64,15 @@ async def run(settings: Settings) -> None:
     logger.info(f"Database connected: {settings.db_path}")
 
     # LLM Provider
-    llm = create_provider(settings.llm_provider, settings.api_key, settings.model)
+    llm = create_provider(
+        settings.llm_provider,
+        settings.api_key,
+        settings.model,
+        base_url=settings.base_url or None,
+        temperature=settings.temperature,
+        timeout=settings.timeout,
+        thinking=settings.thinking,
+    )
 
     # Memory
     file_memory = FileMemory(settings.groups_path)
@@ -144,6 +152,22 @@ async def run(settings: Settings) -> None:
         )
         adapters.append(dingtalk)
 
+    if settings.wechat_enabled:
+        from xclaw.channels.wechat import WeChatAdapter
+
+        wechat = WeChatAdapter(
+            base_url=settings.wechat_base_url,
+            account_path=settings.wechat_account_path,
+            state_path=settings.wechat_state_path,
+            qr_total_timeout_seconds=settings.wechat_qr_total_timeout_seconds,
+            qr_poll_interval_seconds=settings.wechat_qr_poll_interval_seconds,
+            poll_timeout_ms=settings.wechat_poll_timeout_ms,
+            max_reply_chars=settings.wechat_max_reply_chars,
+            qr_poll_timeout_seconds=settings.wechat_qr_poll_timeout_seconds,
+            message_handler=lambda cid, text: handle_message(cid, text, "wechat"),
+        )
+        adapters.append(wechat)
+
     if settings.wechat_mp_enabled:
         from xclaw.channels.wechat_mp import WeChatMPAdapter
 
@@ -190,6 +214,12 @@ async def run(settings: Settings) -> None:
                 if isinstance(adapter, FeishuAdapter):
                     web_app.state.set_feishu_adapter(adapter)
                     break
+        if settings.wechat_enabled:
+            from xclaw.channels.wechat import WeChatAdapter
+            for adapter in adapters:
+                if isinstance(adapter, WeChatAdapter):
+                    web_app.state.set_wechat_adapter(adapter)
+                    break
         if settings.wechat_mp_enabled:
             from xclaw.channels.wechat_mp import WeChatMPAdapter
             for adapter in adapters:
@@ -218,6 +248,7 @@ async def run(settings: Settings) -> None:
     await db.close()
     for adapter in adapters:
         await adapter.stop()
+        if hasattr(adapter, "close"):
+            await adapter.close()
     for client in mcp_clients:
         await client.close()
-

@@ -40,6 +40,7 @@ dependencies = [
     # Web scraping helpers
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
+    "qrcode>=7.4",
 ]
 
 [project.optional-dependencies]

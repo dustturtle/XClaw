@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"
     api_key: str = ""
     model: str = "claude-opus-4-5"
+    base_url: str = ""
+    temperature: float | None = None
+    timeout: float = 120.0
+    thinking: bool | None = None
     max_tokens: int = 4096
     max_tool_iterations: int = 50
 
@@ -59,6 +63,15 @@ class Settings(BaseSettings):
     dingtalk_app_key: str = ""
     dingtalk_app_secret: str = ""
     dingtalk_robot_code: str = ""
+
+    # ── WeChat via iLink (二维码登录 + 私聊 Bot) ───────────────────────────────
+    wechat_enabled: bool = False
+    wechat_base_url: str = "https://ilinkai.weixin.qq.com"
+    wechat_qr_total_timeout_seconds: int = 480
+    wechat_qr_poll_timeout_seconds: int = 35
+    wechat_qr_poll_interval_seconds: int = 1
+    wechat_poll_timeout_ms: int = 25_000
+    wechat_max_reply_chars: int = 1_500
 
     # ── WeChat Official Account / Mini Program (微信公众号 / 小程序) ──────────
     wechat_mp_enabled: bool = False
@@ -119,6 +132,20 @@ class Settings(BaseSettings):
             raise ValueError(f"stock_market_default must be one of {allowed}")
         return v
 
+    @field_validator("temperature")
+    @classmethod
+    def validate_temperature(cls, v: float | None) -> float | None:
+        if v is not None and not 0 <= v <= 2:
+            raise ValueError("temperature must be between 0 and 2")
+        return v
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("timeout must be greater than 0")
+        return v
+
     @property
     def data_path(self) -> Path:
         return Path(self.data_dir)
@@ -134,6 +161,14 @@ class Settings(BaseSettings):
     @property
     def groups_path(self) -> Path:
         return self.data_path / "groups"
+
+    @property
+    def wechat_account_path(self) -> Path:
+        return self.data_path / "wechat_account.json"
+
+    @property
+    def wechat_state_path(self) -> Path:
+        return self.data_path / "wechat_state.json"
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:

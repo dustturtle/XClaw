@@ -255,6 +255,33 @@ qq_app_id: "your_app_id"
 qq_app_secret: "your_app_secret"
 ```
 
+### 微信（WeChat / iLink 二维码登录）
+
+这条链路适合已经接入 iLink 的微信 Bot 场景：
+
+1. 在配置文件里启用 `wechat_enabled`
+2. 启动 XClaw 后调用 `POST /api/auth/wechat/start` 获取二维码
+3. 用户扫码确认后轮询 `GET /api/auth/wechat/status/{login_id}`
+4. 确认成功后，XClaw 会自动开始通过 iLink 长轮询接收私聊消息
+
+```yaml
+wechat_enabled: true
+wechat_base_url: "https://ilinkai.weixin.qq.com"
+wechat_qr_total_timeout_seconds: 480
+wechat_qr_poll_timeout_seconds: 35
+wechat_qr_poll_interval_seconds: 1
+wechat_poll_timeout_ms: 25000
+wechat_max_reply_chars: 1500
+```
+
+常用接口：
+
+- `POST /api/auth/wechat/start`：开始登录，返回 `login_id` 与二维码 SVG
+- `GET /api/auth/wechat/status/{login_id}`：查询扫码状态
+- `GET /api/auth/wechat/session`：查看当前是否已绑定微信 Bot
+- `POST /api/auth/wechat/logout`：清除当前绑定
+- `GET /api/wechat/bot/status`：查看轮询状态与最近错误
+
 ### 微信公众号（WeChat Official Account）
 
 > 详细设计见 [`docs/wechat-design.md`](docs/wechat-design.md)
@@ -326,6 +353,11 @@ wx.request({
 | `GET /api/sessions` | GET | ✅ | 查看会话列表 |
 | `GET /api/sessions/{id}/messages` | GET | ✅ | 查看会话历史消息 |
 | `GET /api/config` | GET | ✅ | 查看当前配置（已脱敏，不含 API Key）|
+| `POST /api/auth/wechat/start` | POST | ✅ | 开始 iLink 微信二维码登录 |
+| `GET /api/auth/wechat/status/{login_id}` | GET | ✅ | 查询微信二维码登录状态 |
+| `GET /api/auth/wechat/session` | GET | ✅ | 查看当前微信 Bot 绑定状态 |
+| `POST /api/auth/wechat/logout` | POST | ✅ | 解除当前微信 Bot 绑定 |
+| `GET /api/wechat/bot/status` | GET | ✅ | 查看微信长轮询运行状态 |
 
 ### Webhook 接口
 
@@ -1110,6 +1142,7 @@ tests/
 ├── test_memory.py            # 记忆系统
 ├── test_scheduler.py         # 定时任务
 ├── test_channels.py          # 渠道适配（Feishu/WeCom/DingTalk/QQ/Web）
+├── test_wechat_ilink.py      # 微信 iLink 二维码登录 / 长轮询 Bot
 ├── test_wechat.py            # 微信公众号/小程序（24 个测试）
 └── test_phase5.py            # Phase 5 全量测试（65 个测试）
 ```
@@ -1181,4 +1214,3 @@ class MyTool(Tool):
 ## License
 
 MIT License — 详见 [LICENSE](LICENSE)
-

@@ -137,12 +137,15 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+.xclaw.config.yaml
+xclaw.config.yaml
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+xclaw.data/
 
 # Spyder project settings
 .spyderproject

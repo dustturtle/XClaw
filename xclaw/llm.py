@@ -53,10 +53,15 @@ class AnthropicProvider(LLMProvider):
     BASE_URL = "https://api.anthropic.com/v1/messages"
     ANTHROPIC_VERSION = "2023-06-01"
 
-    def __init__(self, api_key: str, model: str = "claude-opus-4-5") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-opus-4-5",
+        timeout: float = 120.0,
+    ) -> None:
         self.api_key = api_key
         self.model = model
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self._client = httpx.AsyncClient(timeout=timeout)
 
     def _build_payload(
         self,
@@ -215,11 +220,16 @@ class OpenAICompatibleProvider(LLMProvider):
         api_key: str,
         model: str = "gpt-4o",
         base_url: str = "https://api.openai.com/v1",
+        timeout: float = 120.0,
+        temperature: float | None = None,
+        thinking: bool | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self.temperature = temperature
+        self.thinking = thinking
+        self._client = httpx.AsyncClient(timeout=timeout)
 
     def _serialize_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -230,6 +240,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 # Flatten blocks into a single string for OpenAI
                 parts: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
+                saw_tool_result = False
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         parts.append(block.text)
@@ -245,6 +256,7 @@ class OpenAICompatibleProvider(LLMProvider):
                             }
                         )
                     else:  # ToolResultBlock
+                        saw_tool_result = True
                         result.append(
                             {
                                 "role": "tool",
@@ -253,6 +265,12 @@ class OpenAICompatibleProvider(LLMProvider):
                             }
                         )
                         continue
+
+                # Tool results are emitted as standalone ``tool`` messages.
+                # Do not append an extra parent message with ``content=None``,
+                # which breaks OpenAI-compatible APIs such as Volcengine Ark.
+                if saw_tool_result and not parts and not tool_calls:
+                    continue
 
                 entry: dict[str, Any] = {"role": msg.role, "content": "\n".join(parts) or None}
                 if tool_calls:
@@ -307,6 +325,12 @@ class OpenAICompatibleProvider(LLMProvider):
             "max_tokens": max_tokens,
             "messages": all_messages,
         }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.thinking is not None:
+            payload["thinking"] = {
+                "type": "enabled" if self.thinking else "disabled",
+            }
         if tools:
             payload["tools"] = [
                 {
@@ -357,10 +381,13 @@ def create_provider(
     api_key: str,
     model: str,
     base_url: str | None = None,
+    temperature: float | None = None,
+    timeout: float = 120.0,
+    thinking: bool | None = None,
 ) -> LLMProvider:
     """Factory that returns the correct LLMProvider based on config."""
     if provider == "anthropic":
-        return AnthropicProvider(api_key=api_key, model=model)
+        return AnthropicProvider(api_key=api_key, model=model, timeout=timeout)
     # OpenAI-compatible providers
     urls = {
         "openai": "https://api.openai.com/v1",
@@ -368,4 +395,11 @@ def create_provider(
         "ollama": "http://localhost:11434/v1",
     }
     resolved_url = base_url or urls.get(provider, "https://api.openai.com/v1")
-    return OpenAICompatibleProvider(api_key=api_key, model=model, base_url=resolved_url)
+    return OpenAICompatibleProvider(
+        api_key=api_key,
+        model=model,
+        base_url=resolved_url,
+        timeout=timeout,
+        temperature=temperature,
+        thinking=thinking,
+    )

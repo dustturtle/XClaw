@@ -24,6 +24,7 @@ from xclaw.tools import ToolContext, ToolRegistry
 
 # Pattern to detect "记住..." / "remember..." quick-memory commands
 _MEMORY_PATTERN = re.compile(r"^(?:记住|remember)[：:]\s*(.+)", re.IGNORECASE | re.DOTALL)
+_EMPTY_REPLY_FALLBACK = "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
 
 
 class AgentContext:
@@ -158,6 +159,11 @@ def _messages_from_serializable(data: list[dict]) -> list[Message]:
     return messages
 
 
+def _normalize_final_text(text: str) -> str:
+    """Prevent blank assistant replies from surfacing to end users."""
+    return text if text.strip() else _EMPTY_REPLY_FALLBACK
+
+
 async def agent_loop(
     ctx: AgentContext,
     user_message: str,
@@ -216,6 +222,7 @@ async def agent_loop(
     tool_context = ToolContext(
         chat_id=ctx.chat_id,
         channel=ctx.channel,
+        llm=ctx.llm,
         db=ctx.db,
         settings=settings,
         file_memory=ctx.file_memory,
@@ -249,14 +256,14 @@ async def agent_loop(
                 pass
 
         if response.stop_reason == StopReason.end_turn:
-            final_text = response.text()
+            final_text = _normalize_final_text(response.text())
             messages.append(Message(role="assistant", content=response.content))
             break
 
         if response.stop_reason == StopReason.tool_use:
             tool_uses = response.tool_uses()
             if not tool_uses:
-                final_text = response.text()
+                final_text = _normalize_final_text(response.text())
                 messages.append(Message(role="assistant", content=response.content))
                 break
 
@@ -283,7 +290,7 @@ async def agent_loop(
             continue
 
         # max_tokens or stop_sequence
-        final_text = response.text()
+        final_text = _normalize_final_text(response.text())
         messages.append(Message(role="assistant", content=response.content))
         break
     else:

@@ -33,6 +33,7 @@ class ToolContext:
         self,
         chat_id: int,
         channel: str,
+        llm: Any = None,
         db: Any = None,
         settings: Any = None,
         file_memory: Any = None,
@@ -40,6 +41,7 @@ class ToolContext:
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
+        self.llm = llm
         self.db = db
         self.settings = settings
         self.file_memory = file_memory
