@@ -47,8 +47,9 @@ class SubAgentTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "将子任务委托给受限的子 Agent 执行（只读工具集：网络搜索、行情查询等）。"
-            "子 Agent 完成任务后返回文本结果。"
+            "仅用于需要多步骤、多工具协作的复杂研究任务（如对比多只股票、综合多数据源交叉验证）。"
+            "单一数据查询+分析（如单只股票/指数的K线缺口分析、技术指标计算、行情查询）"
+            "请直接调用对应的数据工具后自行分析，不要委托给 sub_agent。"
         )
 
     @property

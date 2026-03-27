@@ -138,15 +138,25 @@ for iteration in range(_max_iter):
 
 ## TODO
 
-- [ ] 方案 1：修改 `sub_agent.py`，子 agent 使用独立临时 session，不共享父级 chat_id 的 session 数据
-- [ ] 方案 1：修改 `agent_engine.py`，支持 sub_agent 传入 `skip_session_persistence` 标志（或新建临时 chat_id）
-- [ ] 方案 1：补充 sub_agent 隔离的单元测试
-- [ ] 方案 2：在 `agent_engine.py` 中实现 `_micro_compact` 函数
-- [ ] 方案 2：在 agent_loop 的 LLM 调用前插入 `_micro_compact(messages)` 调用
-- [ ] 方案 2：补充 micro_compact 的单元测试
-- [ ] 方案 3：`config.py` 中 `max_tool_iterations` 默认值从 50 改为 10
-- [ ] 方案 3：`sub_agent.py` 中 `max_iterations` 上限从 20 改为 5
-- [ ] 方案 4：在 `agent_engine.py` tool loop 中加入连续错误计数和 early-stop 逻辑
-- [ ] 方案 4：补充连续错误 early-stop 的单元测试
-- [ ] 全部改动完成后运行完整测试套件验证
+- [x] 方案 1：修改 `sub_agent.py`，子 agent 使用独立临时 session，不共享父级 chat_id 的 session 数据
+- [x] 方案 1：修改 `agent_engine.py`，支持 sub_agent 传入 `skip_session_persistence` 标志（或新建临时 chat_id）
+- [x] 方案 1：补充 sub_agent 隔离的单元测试
+- [x] 方案 2：在 `agent_engine.py` 中实现 `_micro_compact` 函数
+- [x] 方案 2：在 agent_loop 的 LLM 调用前插入 `_micro_compact(messages)` 调用
+- [x] 方案 2：补充 micro_compact 的单元测试
+- [x] 方案 3：`config.py` 中 `max_tool_iterations` 默认值从 50 改为 10
+- [x] 方案 3：`sub_agent.py` 中 `max_iterations` 上限从 20 改为 5
+- [x] 方案 4：在 `agent_engine.py` tool loop 中加入连续错误计数和 early-stop 逻辑
+- [x] 方案 4：补充连续错误 early-stop 的单元测试
+- [x] 全部改动完成后运行完整测试套件验证
 - [ ] 部署到测试环境，用"上证指数最近20天的K线还有缺口没补吗"端到端验证
+
+### 追加优化（2026-03-27 第二轮）
+
+实测发现"华泰证券最近一个月有缺口没补吗？"仍被模型路由进 sub_agent，导致 3 次 LLM 调用（主 agent→sub_agent→主 agent）。根因是工具描述不够精确，模型无法正确判断何时该直接调工具、何时才需要委托。
+
+**修复**：精准化工具描述（不改控制流，让模型自己做对决策）
+
+- [x] `sub_agent` description 明确限定"仅用于多步骤、多工具协作的复杂研究任务"，单一数据查询+分析明确要求不要使用 sub_agent
+- [x] `stock_history` description 补充"获取数据后可直接分析，无需再调其他工具"引导模型一步到位
+- [ ] 部署验证"华泰证券最近一个月有缺口没补吗"不再走 sub_agent 路径
