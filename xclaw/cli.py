@@ -67,7 +67,7 @@ def setup() -> None:
         f"api_key: \"{api_key}\"",
         f"model: \"{model}\"",
         f"max_tokens: 4096",
-        f"max_tool_iterations: 50",
+        f"max_tool_iterations: 10",
         "",
         "web_enabled: true",
         "web_host: \"127.0.0.1\"",

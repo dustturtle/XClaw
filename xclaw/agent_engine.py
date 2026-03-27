@@ -25,6 +25,13 @@ from xclaw.tools import ToolContext, ToolRegistry
 # Pattern to detect "记住..." / "remember..." quick-memory commands
 _MEMORY_PATTERN = re.compile(r"^(?:记住|remember)[：:]\s*(.+)", re.IGNORECASE | re.DOTALL)
 _EMPTY_REPLY_FALLBACK = "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
+_MICRO_COMPACT_KEEP_RECENT_TOOL_RESULTS = 3
+_MICRO_COMPACT_PLACEHOLDER = "[已处理的工具结果，原内容已压缩]"
+_MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS = 3
+_EARLY_STOP_INSTRUCTION = (
+    "多个工具已连续失败。请不要继续调用工具，基于当前已获得的信息直接回答用户；"
+    "如果信息不足，请明确说明缺失点。"
+)
 
 
 class AgentContext:
@@ -41,6 +48,8 @@ class AgentContext:
         structured_memory: StructuredMemory | None = None,
         settings: Any = None,
         scheduler: Any = None,
+        skip_session_persistence: bool = False,
+        skip_message_persistence: bool = False,
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -51,6 +60,8 @@ class AgentContext:
         self.structured_memory = structured_memory
         self.settings = settings
         self.scheduler = scheduler
+        self.skip_session_persistence = skip_session_persistence
+        self.skip_message_persistence = skip_message_persistence
 
 
 def _build_system_prompt(
@@ -166,6 +177,27 @@ def _normalize_final_text(text: str) -> str:
     return text if text.strip() else _EMPTY_REPLY_FALLBACK
 
 
+def _micro_compact(
+    messages: list[Message],
+    keep_recent_tool_results: int = _MICRO_COMPACT_KEEP_RECENT_TOOL_RESULTS,
+) -> None:
+    """Shrink older tool results so the model focuses on recent evidence."""
+    tool_results: list[ToolResultBlock] = []
+    for message in messages:
+        if not isinstance(message.content, list):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                tool_results.append(block)
+
+    if len(tool_results) <= keep_recent_tool_results:
+        return
+
+    for block in tool_results[:-keep_recent_tool_results]:
+        if len(block.content) > 100:
+            block.content = _MICRO_COMPACT_PLACEHOLDER
+
+
 async def agent_loop(
     ctx: AgentContext,
     user_message: str,
@@ -183,7 +215,7 @@ async def agent_loop(
     8. Return final text response.
     """
     settings = ctx.settings
-    _max_iter = max_iterations or (settings.max_tool_iterations if settings else 50)
+    _max_iter = max_iterations or (settings.max_tool_iterations if settings else 10)
     _max_session = settings.max_session_messages if settings else 40
     _keep_recent = settings.compact_keep_recent if settings else 20
 
@@ -195,10 +227,10 @@ async def agent_loop(
         return f"已记住：{fact}"
 
     # ── 2. Load session ──────────────────────────────────────────────────────
-    raw_session = await ctx.db.load_session(ctx.chat_id)
-    messages: list[Message] = (
-        _messages_from_serializable(raw_session) if raw_session else []
-    )
+    raw_session = None
+    if not ctx.skip_session_persistence:
+        raw_session = await ctx.db.load_session(ctx.chat_id)
+    messages: list[Message] = _messages_from_serializable(raw_session) if raw_session else []
 
     # ── 3. Build system prompt ───────────────────────────────────────────────
     file_mem_content = ""
@@ -217,7 +249,8 @@ async def agent_loop(
     messages.append(Message(role="user", content=user_message))
 
     # ── 6. Save user message to history ─────────────────────────────────────
-    await ctx.db.save_message(ctx.chat_id, "user", user_message)
+    if not ctx.skip_message_persistence:
+        await ctx.db.save_message(ctx.chat_id, "user", user_message)
 
     # ── 7. Tool loop ─────────────────────────────────────────────────────────
     tool_defs = ctx.tools.get_definitions()
@@ -233,11 +266,14 @@ async def agent_loop(
     )
 
     final_text = ""
+    consecutive_error_rounds = 0
+    force_direct_answer = False
     for iteration in range(_max_iter):
+        _micro_compact(messages)
         try:
             response: LLMResponse = await ctx.llm.chat(
                 messages=messages,
-                tools=tool_defs if tool_defs else None,
+                tools=(tool_defs if tool_defs and not force_direct_answer else None),
                 system=system_prompt,
                 max_tokens=settings.max_tokens if settings else 4096,
             )
@@ -290,6 +326,14 @@ async def agent_loop(
             messages.append(
                 Message(role="user", content=tool_result_blocks)  # type: ignore[arg-type]
             )
+
+            if tool_result_blocks and all(block.is_error for block in tool_result_blocks):
+                consecutive_error_rounds += 1
+                if consecutive_error_rounds >= _MAX_CONSECUTIVE_TOOL_ERROR_ROUNDS:
+                    force_direct_answer = True
+                    messages.append(Message(role="user", content=_EARLY_STOP_INSTRUCTION))
+            else:
+                consecutive_error_rounds = 0
             continue
 
         # max_tokens or stop_sequence
@@ -300,7 +344,9 @@ async def agent_loop(
         final_text = "已达到最大工具调用轮数，请缩短任务或分步执行。"
 
     # ── 8. Persist session and assistant message ─────────────────────────────
-    await ctx.db.save_message(ctx.chat_id, "assistant", final_text)
-    await ctx.db.save_session(ctx.chat_id, _messages_to_serializable(messages))
+    if not ctx.skip_message_persistence:
+        await ctx.db.save_message(ctx.chat_id, "assistant", final_text)
+    if not ctx.skip_session_persistence:
+        await ctx.db.save_session(ctx.chat_id, _messages_to_serializable(messages))
 
     return final_text

@@ -62,7 +62,7 @@ class SubAgentTool(Tool):
                 },
                 "max_iterations": {
                     "type": "integer",
-                    "description": "子 Agent 最大工具调用轮数（默认 10）",
+                    "description": "子 Agent 最大工具调用轮数（默认 5）",
                 },
             },
             "required": ["task"],
@@ -77,7 +77,7 @@ class SubAgentTool(Tool):
         if not task:
             return ToolResult(content="task 不能为空", is_error=True)
 
-        max_iter = min(int(params.get("max_iterations", 10)), 20)
+        max_iter = min(int(params.get("max_iterations", 5)), 5)
 
         # Build a restricted registry from the parent's tools
         sub_registry = ToolRegistry()
@@ -109,6 +109,8 @@ class SubAgentTool(Tool):
             tools=sub_registry,
             structured_memory=context.structured_memory,
             settings=context.settings,
+            skip_session_persistence=True,
+            skip_message_persistence=True,
         )
 
         try:

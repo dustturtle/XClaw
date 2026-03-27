@@ -10,7 +10,7 @@ temperature:                       # 可选，OpenAI-compatible 常用；0-2
 timeout: 120.0                     # LLM 请求超时（秒）
 thinking:                          # 可选，支持时启用深度思考模式
 max_tokens: 4096
-max_tool_iterations: 50
+max_tool_iterations: 10
 
 # ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
 # Web 界面（默认启用，绑定本地，不暴露公网）

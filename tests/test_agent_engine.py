@@ -12,6 +12,7 @@ import pytest
 from xclaw.agent_engine import (
     AgentContext,
     _build_system_prompt,
+    _micro_compact,
     _messages_from_serializable,
     _messages_to_serializable,
     _normalize_final_text,
@@ -30,7 +31,8 @@ from xclaw.llm_types import (
     ToolResultBlock,
 )
 from xclaw.memory import FileMemory, StructuredMemory
-from xclaw.tools import ToolContext, ToolRegistry, ToolResult
+from xclaw.tools import Tool, ToolContext, ToolRegistry, ToolResult
+from xclaw.tools.sub_agent import SubAgentTool
 
 
 # ── Mock LLM ──────────────────────────────────────────────────────────────────
@@ -255,6 +257,32 @@ def test_normalize_final_text_fallback():
     assert _normalize_final_text("有内容") == "有内容"
 
 
+def test_micro_compact_replaces_old_tool_results():
+    messages = [
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="t1", content="A" * 120),
+                ToolResultBlock(tool_use_id="t2", content="B" * 120),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="t3", content="C" * 120),
+                ToolResultBlock(tool_use_id="t4", content="D" * 120),
+            ],
+        ),
+    ]
+
+    _micro_compact(messages, keep_recent_tool_results=2)
+
+    assert messages[0].content[0].content == "[已处理的工具结果，原内容已压缩]"
+    assert messages[0].content[1].content == "[已处理的工具结果，原内容已压缩]"
+    assert messages[1].content[0].content == "C" * 120
+    assert messages[1].content[1].content == "D" * 120
+
+
 @pytest.mark.asyncio
 async def test_empty_end_turn_reply_uses_fallback(db: Database, tmp_path: Path):
     chat_id = await db.get_or_create_chat("web", "empty_reply_user")
@@ -277,3 +305,91 @@ async def test_empty_end_turn_reply_uses_fallback(db: Database, tmp_path: Path):
     reply = await agent_loop(ctx, "测试空回复")
 
     assert reply == "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_forces_direct_answer_after_consecutive_tool_errors(db: Database, tmp_path: Path):
+    chat_id = await db.get_or_create_chat("web", "error_stop_user")
+
+    class AlwaysErrorTool(Tool):
+        @property
+        def name(self): return "always_error"
+        @property
+        def description(self): return "always error"
+        @property
+        def parameters(self): return {"type": "object", "properties": {}, "required": []}
+        async def execute(self, params, context): return ToolResult(content="失败", is_error=True)
+
+    llm = MockLLMProvider([
+        LLMResponse(stop_reason=StopReason.tool_use, content=[ToolUseBlock(id="e1", name="always_error", input={})]),
+        LLMResponse(stop_reason=StopReason.tool_use, content=[ToolUseBlock(id="e2", name="always_error", input={})]),
+        LLMResponse(stop_reason=StopReason.tool_use, content=[ToolUseBlock(id="e3", name="always_error", input={})]),
+        LLMResponse(stop_reason=StopReason.end_turn, content=[TextBlock(text="基于已有信息直接回答。")]),
+    ])
+
+    tools = ToolRegistry()
+    tools.register(AlwaysErrorTool())
+    ctx = AgentContext(
+        chat_id=chat_id,
+        channel="web",
+        db=db,
+        llm=llm,
+        tools=tools,
+        file_memory=FileMemory(tmp_path / "groups"),
+        structured_memory=StructuredMemory(db),
+    )
+
+    reply = await agent_loop(ctx, "测试连续失败收口", max_iterations=10)
+
+    assert reply == "基于已有信息直接回答。"
+    assert len(llm._calls) == 4
+    assert llm._calls[-1]["tools"] is None
+    assert any(
+        message.role == "user"
+        and message.content == "多个工具已连续失败。请不要继续调用工具，基于当前已获得的信息直接回答用户；如果信息不足，请明确说明缺失点。"
+        for message in llm._calls[-1]["messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_does_not_load_or_save_parent_session(db: Database):
+    chat_id = await db.get_or_create_chat("web", "subagent_parent")
+    parent_session = [
+        {"role": "user", "content": "父级历史"},
+        {"role": "assistant", "content": "父级答复"},
+    ]
+    await db.save_session(chat_id, parent_session)
+    await db.save_message(chat_id, "user", "父级消息")
+
+    llm = MockLLMProvider([
+        LLMResponse(
+            stop_reason=StopReason.end_turn,
+            content=[TextBlock(text="子 Agent 完成")],
+        )
+    ])
+    registry = ToolRegistry()
+    sub_agent_tool = SubAgentTool(registry)
+
+    result = await sub_agent_tool.execute(
+        {"task": "只返回一个结论"},
+        ToolContext(
+            chat_id=chat_id,
+            channel="web",
+            llm=llm,
+            db=db,
+            settings=MagicMock(max_tokens=1024, max_tool_iterations=10, max_session_messages=40, compact_keep_recent=20),
+            structured_memory=StructuredMemory(db),
+        ),
+    )
+
+    assert result.content == "子 Agent 完成"
+    assert len(llm._calls) == 1
+    sent_messages = llm._calls[0]["messages"]
+    assert sent_messages[0].role == "user"
+    assert sent_messages[0].content == "只返回一个结论"
+    assert all(getattr(message, "content", None) != "父级历史" for message in sent_messages)
+    assert all(getattr(message, "content", None) != "父级答复" for message in sent_messages)
+    assert await db.load_session(chat_id) == parent_session
+    recent_messages = await db.get_recent_messages(chat_id, limit=10)
+    assert len(recent_messages) == 1
+    assert recent_messages[0]["content"] == "父级消息"

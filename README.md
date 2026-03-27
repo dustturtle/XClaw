@@ -183,7 +183,7 @@ curl -s -X POST http://127.0.0.1:8080/api/chat \
 | `api_key` | `""` | LLM API Key（建议通过环境变量设置） |
 | `model` | `claude-opus-4-5` | 模型名称，可替换为 `gpt-4o`、`deepseek-chat`、`llama3` 等 |
 | `max_tokens` | `4096` | 单次 LLM 回复最大 token 数 |
-| `max_tool_iterations` | `50` | Agent 单轮工具调用最大轮次 |
+| `max_tool_iterations` | `10` | Agent 单轮工具调用最大轮次 |
 
 ### Web 服务配置
 

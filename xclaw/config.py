@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     timeout: float = 120.0
     thinking: bool | None = None
     max_tokens: int = 4096
-    max_tool_iterations: int = 50
+    max_tool_iterations: int = 10
 
     # ── Web channel ──────────────────────────────────────────────────────────
     web_enabled: bool = True
