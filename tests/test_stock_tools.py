@@ -12,6 +12,7 @@ from xclaw.tools import ToolContext, ToolResult
 from xclaw.tools.market_overview import MarketOverviewTool
 from xclaw.tools.portfolio import PortfolioManageTool
 from xclaw.tools.stock_fundamentals import StockFundamentalsTool
+from xclaw.tools.stock_gap_analysis import StockGapAnalysisTool
 from xclaw.tools.stock_history import StockHistoryTool
 from xclaw.tools.stock_indicators import StockIndicatorsTool
 from xclaw.tools.stock_news import StockNewsTool
@@ -177,6 +178,47 @@ async def test_stock_history_stock_bare_code_not_resolved():
     assert not result.is_error
     # Without asset_type=index, 000001 should NOT be rewritten
     assert captured_symbol["value"] == "000001"
+
+
+@pytest.mark.asyncio
+async def test_stock_gap_analysis_does_not_false_positive_on_overlap_dates():
+    mock_df = pd.DataFrame([
+        {"日期": "2026-03-16", "开盘": 19.66, "收盘": 19.48, "最高": 19.67, "最低": 19.28, "成交量": 1},
+        {"日期": "2026-03-17", "开盘": 19.56, "收盘": 19.75, "最高": 20.37, "最低": 19.54, "成交量": 1},
+        {"日期": "2026-03-23", "开盘": 18.78, "收盘": 18.26, "最高": 18.84, "最低": 18.14, "成交量": 1},
+        {"日期": "2026-03-24", "开盘": 18.45, "收盘": 18.44, "最高": 18.65, "最低": 18.22, "成交量": 1},
+    ])
+    mock_df.attrs["source"] = "baostock"
+
+    with patch("xclaw.tools.stock_gap_analysis.fetch_cn_history_dataframe", AsyncMock(return_value=mock_df)):
+        tool = StockGapAnalysisTool()
+        result = await tool.execute({"symbol": "601688", "market": "CN", "limit": 30}, _ctx())
+
+    assert not result.is_error
+    assert "2026-03-17 向上跳空" not in result.content
+    assert "2026-03-24 向下跳空" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_gap_analysis_detects_real_gaps_and_fill_status():
+    mock_df = pd.DataFrame([
+        {"日期": "2026-03-01", "开盘": 10.0, "收盘": 10.1, "最高": 10.2, "最低": 9.9, "成交量": 1},
+        {"日期": "2026-03-02", "开盘": 10.5, "收盘": 10.6, "最高": 10.8, "最低": 10.4, "成交量": 1},
+        {"日期": "2026-03-03", "开盘": 10.3, "收盘": 10.1, "最高": 10.35, "最低": 9.8, "成交量": 1},
+        {"日期": "2026-03-04", "开盘": 9.4, "收盘": 9.3, "最高": 9.5, "最低": 9.2, "成交量": 1},
+        {"日期": "2026-03-05", "开盘": 9.6, "收盘": 9.7, "最高": 9.95, "最低": 9.5, "成交量": 1},
+    ])
+    mock_df.attrs["source"] = "baostock"
+
+    with patch("xclaw.tools.stock_gap_analysis.fetch_cn_history_dataframe", AsyncMock(return_value=mock_df)):
+        tool = StockGapAnalysisTool()
+        result = await tool.execute({"symbol": "600519", "market": "CN", "limit": 30}, _ctx())
+
+    assert not result.is_error
+    assert "2026-03-02 向上跳空" in result.content
+    assert "状态: 已回补" in result.content
+    assert "2026-03-04 向下跳空" in result.content
+    assert "未回补: 1" in result.content
 
 
 # ── stock_indicators ──────────────────────────────────────────────────────────

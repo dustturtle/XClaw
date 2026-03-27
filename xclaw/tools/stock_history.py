@@ -23,7 +23,7 @@ class StockHistoryTool(Tool):
         return (
             "获取股票或指数历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量。"
             "查询指数（如上证指数、深证成指）时请将 asset_type 设为 index。"
-            "获取数据后可直接基于返回的K线进行缺口分析、趋势判断等，无需再调用其他工具。"
+            "如需判断跳空缺口，请优先使用 stock_gap_analysis 工具，不要自行根据K线手算。"
         )
 
     @property

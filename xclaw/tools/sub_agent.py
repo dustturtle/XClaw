@@ -18,6 +18,7 @@ _ALLOWED_SUB_AGENT_TOOLS: frozenset[str] = frozenset(
         "web_search",
         "web_fetch",
         "stock_quote",
+        "stock_gap_analysis",
         "stock_history",
         "stock_indicators",
         "stock_fundamentals",
