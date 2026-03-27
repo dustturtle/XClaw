@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -30,6 +31,7 @@ class TaskScheduler:
     def __init__(
         self,
         message_handler: Callable[[str, str, str], Coroutine[Any, Any, str]],
+        result_handler: Callable[[dict[str, Any], str], Coroutine[Any, Any, None]] | None,
         db: Any,
         timezone: str = "Asia/Shanghai",
         after_market_push_enabled: bool = False,
@@ -38,14 +40,17 @@ class TaskScheduler:
         """
         Args:
             message_handler: async (external_chat_id, text, channel) → reply
+            result_handler: async (task_row, reply_text) → None
             db: Database instance for reading scheduled_tasks
             timezone: Scheduler timezone string
             after_market_push_enabled: Enable the built-in daily push
             after_market_chat_ids: External chat IDs to send the daily push to
         """
         self._handler = message_handler
+        self._result_handler = result_handler
         self._db = db
         self._tz = timezone
+        self._zone = ZoneInfo(timezone)
         self._after_market_enabled = after_market_push_enabled
         self._after_market_chat_ids = after_market_chat_ids or []
         self._scheduler = AsyncIOScheduler(timezone=timezone)
@@ -85,10 +90,27 @@ class TaskScheduler:
     def is_running(self) -> bool:
         return self._scheduler.running
 
+    def _job_id(self, task_id: int) -> str:
+        return f"db_task_{task_id}"
+
+    def remove_task(self, task_id: int) -> None:
+        """Remove a scheduled APScheduler job for the given DB task id."""
+        job_id = self._job_id(task_id)
+        if self._scheduler.get_job(job_id) is not None:
+            self._scheduler.remove_job(job_id)
+
+    def _parse_run_date(self, value: str) -> datetime:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=self._zone)
+        else:
+            dt = dt.astimezone(self._zone)
+        return dt
+
     def schedule_from_db_row(self, task: dict[str, Any]) -> None:
         """Register a single DB task row with APScheduler."""
         task_id = task["id"]
-        job_id = f"db_task_{task_id}"
+        job_id = self._job_id(task_id)
 
         if self._scheduler.get_job(job_id):
             return  # already registered
@@ -98,11 +120,20 @@ class TaskScheduler:
         prompt = task["prompt"]
         chat_id = str(task["chat_id"])
 
-        async def run_task(p: str = prompt, cid: str = chat_id, tid: int = task_id) -> None:
+        async def run_task(
+            p: str = prompt,
+            cid: str = chat_id,
+            tid: int = task_id,
+            task_row: dict[str, Any] = dict(task),
+        ) -> None:
             logger.info(f"Running scheduled task id={tid}")
             try:
-                await self._handler(cid, p, "scheduler")
-                # Update next_run_at for cron tasks (APScheduler handles this)
+                reply = await self._handler(cid, p, "scheduler")
+                if self._result_handler is not None:
+                    await self._result_handler(task_row, reply)
+                if not cron:
+                    await self._db.update_task_status(tid, "completed")
+                    self.remove_task(tid)
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"Scheduled task id={tid} error: {exc}")
 
@@ -110,9 +141,7 @@ class TaskScheduler:
             trigger = CronTrigger.from_crontab(cron, timezone=self._tz)
         elif next_run:
             try:
-                dt = datetime.fromisoformat(next_run)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                dt = self._parse_run_date(next_run)
                 trigger = DateTrigger(run_date=dt)
             except ValueError:
                 logger.warning(f"Invalid next_run_at for task {task_id}: {next_run!r}")
@@ -130,9 +159,35 @@ class TaskScheduler:
     async def _run_due_db_tasks(self) -> None:
         """Load active tasks from DB and ensure they are registered with APScheduler."""
         try:
+            active_job_ids: set[str] = set()
             tasks = await self._db.get_active_tasks()
             for task in tasks:
+                task_id = int(task["id"])
+                cron = (task.get("cron_expression") or "").strip()
+                next_run = (task.get("next_run_at") or "").strip()
+                job_id = self._job_id(task_id)
+
+                if not cron and next_run:
+                    try:
+                        run_date = self._parse_run_date(next_run)
+                    except ValueError:
+                        logger.warning(f"Invalid next_run_at for task {task_id}: {next_run!r}")
+                        self.remove_task(task_id)
+                        continue
+
+                    if run_date <= datetime.now(self._zone):
+                        await self._db.update_task_status(task_id, "missed")
+                        self.remove_task(task_id)
+                        continue
+
+                active_job_ids.add(job_id)
                 self.schedule_from_db_row(task)
+
+            for job in self._scheduler.get_jobs():
+                if not job.id.startswith("db_task_"):
+                    continue
+                if job.id not in active_job_ids:
+                    self._scheduler.remove_job(job.id)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Error polling scheduled tasks: {exc}")
 

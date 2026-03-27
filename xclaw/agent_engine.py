@@ -40,6 +40,7 @@ class AgentContext:
         file_memory: FileMemory | None = None,
         structured_memory: StructuredMemory | None = None,
         settings: Any = None,
+        scheduler: Any = None,
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -49,6 +50,7 @@ class AgentContext:
         self.file_memory = file_memory
         self.structured_memory = structured_memory
         self.settings = settings
+        self.scheduler = scheduler
 
 
 def _build_system_prompt(
@@ -227,6 +229,7 @@ async def agent_loop(
         settings=settings,
         file_memory=ctx.file_memory,
         structured_memory=ctx.structured_memory,
+        scheduler=ctx.scheduler,
     )
 
     final_text = ""

@@ -129,6 +129,56 @@ async def test_stock_history_empty_symbol():
     assert result.is_error
 
 
+@pytest.mark.asyncio
+async def test_stock_history_index_bare_code_resolved():
+    """asset_type=index + bare code 000001 should resolve to sh000001 (上证指数), not 000001.SZ (平安银行)."""
+    mock_df = pd.DataFrame([
+        {"日期": "2024-01-01", "开盘": 3100.0, "收盘": 3120.0, "最高": 3130.0, "最低": 3090.0, "成交量": 50000000},
+    ])
+    mock_df.attrs["source"] = "baostock"
+
+    captured_symbol = {}
+
+    async def _capture(symbol, *, period, start_date, end_date):
+        captured_symbol["value"] = symbol
+        return mock_df
+
+    with patch("xclaw.tools.stock_history.fetch_cn_history_dataframe", _capture):
+        tool = StockHistoryTool()
+        result = await tool.execute(
+            {"symbol": "000001", "market": "CN", "asset_type": "index"},
+            _ctx(),
+        )
+    assert not result.is_error
+    # The symbol passed to fetch_cn_history_dataframe should be the resolved index code
+    assert captured_symbol["value"] == "sh000001"
+
+
+@pytest.mark.asyncio
+async def test_stock_history_stock_bare_code_not_resolved():
+    """asset_type=stock (default) + bare code 000001 should remain as-is (平安银行)."""
+    mock_df = pd.DataFrame([
+        {"日期": "2024-01-01", "开盘": 12.0, "收盘": 12.5, "最高": 12.8, "最低": 11.9, "成交量": 8000000},
+    ])
+    mock_df.attrs["source"] = "baostock"
+
+    captured_symbol = {}
+
+    async def _capture(symbol, *, period, start_date, end_date):
+        captured_symbol["value"] = symbol
+        return mock_df
+
+    with patch("xclaw.tools.stock_history.fetch_cn_history_dataframe", _capture):
+        tool = StockHistoryTool()
+        result = await tool.execute(
+            {"symbol": "000001", "market": "CN"},
+            _ctx(),
+        )
+    assert not result.is_error
+    # Without asset_type=index, 000001 should NOT be rewritten
+    assert captured_symbol["value"] == "000001"
+
+
 # ── stock_indicators ──────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

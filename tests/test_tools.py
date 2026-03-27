@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -197,7 +199,13 @@ async def test_portfolio_tool(db):
 @pytest.mark.asyncio
 async def test_schedule_tool(db):
     chat_id = await db.get_or_create_chat("web", "sched_tool_user")
-    ctx = _make_ctx(db=db, chat_id=chat_id)
+    scheduler = MagicMock()
+    ctx = _make_ctx(
+        db=db,
+        chat_id=chat_id,
+        settings=SimpleNamespace(timezone="Asia/Shanghai"),
+        scheduler=scheduler,
+    )
 
     create_tool = ScheduleTaskTool()
     list_tool = ListScheduledTasksTool()
@@ -209,6 +217,7 @@ async def test_schedule_tool(db):
     )
     assert not r.is_error
     assert "id=" in r.content
+    scheduler.schedule_from_db_row.assert_called_once()
 
     r2 = await list_tool.execute({}, ctx)
     assert "每日行情" in r2.content
@@ -221,11 +230,48 @@ async def test_schedule_tool(db):
 
     r3 = await cancel_tool.execute({"task_id": task_id}, ctx)
     assert not r3.is_error
+    scheduler.remove_task.assert_called_once_with(task_id)
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_normalizes_once_run_time(db):
+    chat_id = await db.get_or_create_chat("web", "sched_tool_once_user")
+    scheduler = MagicMock()
+    ctx = _make_ctx(
+        db=db,
+        chat_id=chat_id,
+        settings=SimpleNamespace(timezone="Asia/Shanghai"),
+        scheduler=scheduler,
+    )
+    create_tool = ScheduleTaskTool()
+
+    result = await create_tool.execute(
+        {
+            "description": "收盘提醒",
+            "prompt": "查询收盘价",
+            "run_once_at": "2099-01-01 15:00",
+        },
+        ctx,
+    )
+
+    assert not result.is_error
+    tasks = await db.get_active_tasks()
+    created = [t for t in tasks if t["chat_id"] == chat_id]
+    assert len(created) == 1
+    assert created[0]["next_run_at"] == "2099-01-01T15:00:00+08:00"
+    scheduler.schedule_from_db_row.assert_called_once()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_ctx(db=None, chat_id=1, file_memory=None, structured_memory=None, settings=None) -> ToolContext:
+def _make_ctx(
+    db=None,
+    chat_id=1,
+    file_memory=None,
+    structured_memory=None,
+    settings=None,
+    scheduler=None,
+) -> ToolContext:
     return ToolContext(
         chat_id=chat_id,
         channel="web",
@@ -233,6 +279,7 @@ def _make_ctx(db=None, chat_id=1, file_memory=None, structured_memory=None, sett
         settings=settings,
         file_memory=file_memory,
         structured_memory=structured_memory,
+        scheduler=scheduler,
     )
 
 

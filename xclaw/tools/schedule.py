@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
+
+
+def _normalize_run_once_at(raw_value: str, timezone_name: str) -> str:
+    dt = datetime.fromisoformat(raw_value)
+    local_zone = ZoneInfo(timezone_name)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=local_zone)
+    else:
+        dt = dt.astimezone(local_zone)
+    return dt.isoformat()
 
 
 class ScheduleTaskTool(Tool):
@@ -58,14 +70,40 @@ class ScheduleTaskTool(Tool):
         if not description or not prompt:
             return ToolResult(content="description 和 prompt 不能为空", is_error=True)
 
+        timezone_name = getattr(context.settings, "timezone", "Asia/Shanghai")
+        normalized_run_once_at: str | None = None
+        if run_once_at:
+            try:
+                normalized_run_once_at = _normalize_run_once_at(run_once_at, timezone_name)
+            except ValueError:
+                return ToolResult(
+                    content="run_once_at 格式无效，请使用 YYYY-MM-DD HH:MM 或 ISO 时间",
+                    is_error=True,
+                )
+
+            if datetime.fromisoformat(normalized_run_once_at) <= datetime.now(ZoneInfo(timezone_name)):
+                return ToolResult(content="一次性任务的执行时间必须晚于当前时间", is_error=True)
+
         task_id = await context.db.add_scheduled_task(
             context.chat_id,
             description=description,
             prompt=prompt,
             cron_expression=cron,
-            next_run_at=run_once_at,
+            next_run_at=normalized_run_once_at,
         )
-        task_type = f"cron: {cron}" if cron else f"一次性: {run_once_at or '立即'}"
+        if context.scheduler is not None:
+            context.scheduler.schedule_from_db_row(
+                {
+                    "id": task_id,
+                    "chat_id": context.chat_id,
+                    "description": description,
+                    "prompt": prompt,
+                    "cron_expression": cron or "",
+                    "next_run_at": normalized_run_once_at,
+                    "status": "active",
+                }
+            )
+        task_type = f"cron: {cron}" if cron else f"一次性: {normalized_run_once_at or '立即'}"
         return ToolResult(content=f"定时任务已创建（id={task_id}）\n类型: {task_type}\n描述: {description}")
 
 
@@ -140,4 +178,6 @@ class CancelScheduledTaskTool(Tool):
         if not task_id:
             return ToolResult(content="必须提供 task_id", is_error=True)
         await context.db.update_task_status(task_id, "cancelled")
+        if context.scheduler is not None:
+            context.scheduler.remove_task(task_id)
         return ToolResult(content=f"任务 {task_id} 已取消")

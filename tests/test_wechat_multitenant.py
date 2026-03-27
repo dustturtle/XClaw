@@ -261,3 +261,40 @@ async def test_multitenant_manager_isolates_member_chat_ids(db: Database) -> Non
 
     await service.stop()
     assert ilink_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_multitenant_service_send_response_to_member_chat(db: Database) -> None:
+    ilink_client = FakeIlinkClient()
+    service = _make_service(db, ilink_client=ilink_client)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-send",
+        qr_content="https://example.com/send.png",
+        ttl_seconds=90,
+    )
+    _, member, _credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-send",
+        ilink_bot_id="bot-send",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-send",
+    )
+
+    await service.send_response(build_member_chat_id(tenant["tenant_id"], member["member_id"]), "提醒内容")
+
+    assert len(ilink_client.sent_messages) == 1
+    assert ilink_client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
+    assert ilink_client.sent_messages[0]["text"] == "提醒内容"
+    assert ilink_client.sent_messages[0]["context_token"] == "ctx-send"
+
+    await service.stop()

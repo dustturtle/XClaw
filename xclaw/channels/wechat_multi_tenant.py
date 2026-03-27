@@ -38,6 +38,17 @@ def build_member_chat_id(tenant_id: str, member_id: str) -> str:
     return f"tenant:{tenant_id}:member:{member_id}"
 
 
+def parse_member_chat_id(chat_id: str) -> tuple[str, str]:
+    prefix = "tenant:"
+    separator = ":member:"
+    if not chat_id.startswith(prefix) or separator not in chat_id:
+        raise ValueError(f"Invalid multi-tenant member chat_id: {chat_id}")
+    tenant_id, member_id = chat_id[len(prefix):].split(separator, 1)
+    if not tenant_id or not member_id:
+        raise ValueError(f"Invalid multi-tenant member chat_id: {chat_id}")
+    return tenant_id, member_id
+
+
 class EntityStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -725,6 +736,41 @@ class MultiTenantBotManager:
             name=f"xclaw-tenant-credential-{credential_id}",
         )
 
+    async def send_response(self, member_chat_id: str, text: str) -> None:
+        tenant_id, member_id = parse_member_chat_id(member_chat_id)
+        member_row = await self.db.get_member(member_id)
+        if member_row is None:
+            raise RuntimeError(f"Unknown tenant member: {member_id}")
+        member = TenantMemberRecord.model_validate(member_row)
+        if member.tenant_id != tenant_id:
+            raise RuntimeError(f"Tenant member mismatch for chat_id={member_chat_id}")
+
+        credential_row = await self.db.get_active_credential_for_member(member_id)
+        if credential_row is None:
+            raise RuntimeError(f"No active credential for member_id={member_id}")
+        credential = ChannelCredentialRecord.model_validate(credential_row)
+
+        runtime = MemberRuntimeStateRecord.model_validate(
+            await self.db.get_runtime_state(member_id, tenant_id)
+        )
+        context_token = runtime.context_token.strip()
+        if not context_token:
+            raise RuntimeError(f"Missing context_token for member_id={member_id}")
+
+        clean_text = sanitize_reply_text(text, max_chars=self.max_reply_chars)
+        await self.ilink_client.send_text_message(
+            credential.base_url,
+            credential.bot_token,
+            member.ilink_user_id,
+            clean_text,
+            context_token,
+        )
+        await self.db.update_runtime_state(
+            member_id,
+            tenant_id=tenant_id,
+            last_error=None,
+        )
+
 
 class WeChatMultiTenantService:
     """Aggregate service that exposes invite APIs and polling lifecycle."""
@@ -768,6 +814,9 @@ class WeChatMultiTenantService:
         await self.manager.stop()
         await self.ilink_client.close()
 
+    async def send_response(self, member_chat_id: str, text: str) -> None:
+        await self.manager.send_response(member_chat_id, text)
+
 
 __all__ = [
     "CreateInviteLinkRequest",
@@ -784,4 +833,6 @@ __all__ = [
     "TenantSummaryPayload",
     "WeChatMultiTenantService",
     "build_invite_page",
+    "build_member_chat_id",
+    "parse_member_chat_id",
 ]

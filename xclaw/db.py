@@ -227,6 +227,14 @@ class Database:
             await self.conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
 
+    async def get_chat(self, chat_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM chats WHERE id = ?",
+            (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
     # ── Messages ──────────────────────────────────────────────────────────────
 
     async def save_message(
@@ -340,6 +348,14 @@ class Database:
             (status, task_id),
         )
         await self.conn.commit()
+
+    async def get_scheduled_task(self, task_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM scheduled_tasks WHERE id = ?",
+            (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
 
@@ -749,6 +765,19 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def get_active_credential_for_member(self, member_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            """
+            SELECT * FROM channel_credentials
+            WHERE member_id = ? AND status = ?
+            ORDER BY bound_at DESC
+            LIMIT 1
+            """,
+            (member_id, "active"),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
 
     async def update_credential_get_updates_buf(
         self,

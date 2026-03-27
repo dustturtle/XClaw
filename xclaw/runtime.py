@@ -88,6 +88,8 @@ async def run(settings: Settings) -> None:
         mcp_clients = await load_mcp_tools(settings.mcp_servers, tools)
         logger.info(f"MCP: loaded {len(mcp_clients)} server(s)")
 
+    scheduler = None
+
     # ── Build message handler ─────────────────────────────────────────────────
     async def handle_message(external_chat_id: str, text: str, channel: str = "web") -> str:
         chat_id = await db.get_or_create_chat(channel, external_chat_id)
@@ -100,21 +102,13 @@ async def run(settings: Settings) -> None:
             file_memory=file_memory,
             structured_memory=struct_memory,
             settings=settings,
+            scheduler=scheduler,
         )
         return await agent_loop(ctx, text)
 
-    # ── Task scheduler ────────────────────────────────────────────────────────
-    from xclaw.scheduler import TaskScheduler
-
-    scheduler = TaskScheduler(
-        message_handler=handle_message,
-        db=db,
-        timezone=settings.timezone,
-    )
-    scheduler.start()
-
     # ── Start channel adapters ────────────────────────────────────────────────
     adapters = []
+    adapter_by_channel: dict[str, Any] = {}
     wechat_multi_tenant = None
 
     if settings.feishu_enabled:
@@ -128,6 +122,7 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "feishu"),
         )
         adapters.append(feishu)
+        adapter_by_channel["feishu"] = feishu
 
     if settings.wecom_enabled:
         from xclaw.channels.wecom import WeComAdapter
@@ -141,6 +136,7 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "wecom"),
         )
         adapters.append(wecom)
+        adapter_by_channel["wecom"] = wecom
 
     if settings.dingtalk_enabled:
         from xclaw.channels.dingtalk import DingTalkAdapter
@@ -152,6 +148,7 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "dingtalk"),
         )
         adapters.append(dingtalk)
+        adapter_by_channel["dingtalk"] = dingtalk
 
     if settings.wechat_enabled:
         from xclaw.channels.wechat import WeChatAdapter
@@ -169,6 +166,7 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "wechat"),
         )
         adapters.append(wechat)
+        adapter_by_channel["wechat"] = wechat
         wechat_multi_tenant = WeChatMultiTenantService(
             db=db,
             base_url=settings.wechat_base_url,
@@ -191,6 +189,7 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "wechat_mp"),
         )
         adapters.append(wechat_mp)
+        adapter_by_channel["wechat_mp"] = wechat_mp
 
     if settings.qq_enabled:
         from xclaw.channels.qq import QQAdapter
@@ -201,12 +200,48 @@ async def run(settings: Settings) -> None:
             message_handler=lambda cid, text: handle_message(cid, text, "qq"),
         )
         adapters.append(qq)
+        adapter_by_channel["qq"] = qq
+
+    async def deliver_scheduled_result(task: dict[str, Any], reply: str) -> None:
+        chat_row = await db.get_chat(int(task["chat_id"]))
+        if chat_row is None:
+            logger.warning(f"Scheduled task {task['id']} target chat is missing")
+            return
+
+        channel = chat_row["channel"]
+        external_chat_id = str(chat_row["external_chat_id"])
+        if channel in {"web", "scheduler"}:
+            logger.info(f"Scheduled task {task['id']} produced reply for channel={channel}; no push")
+            return
+
+        if channel == "wechat" and external_chat_id.startswith("tenant:"):
+            if wechat_multi_tenant is None:
+                raise RuntimeError("WeChat multi-tenant service is not available")
+            await wechat_multi_tenant.send_response(external_chat_id, reply)
+            return
+
+        adapter = adapter_by_channel.get(channel)
+        if adapter is None:
+            logger.warning(f"No adapter available to deliver scheduled task {task['id']} reply")
+            return
+        await adapter.send_response(external_chat_id, reply)
+
+    # ── Task scheduler ────────────────────────────────────────────────────────
+    from xclaw.scheduler import TaskScheduler
+
+    scheduler = TaskScheduler(
+        message_handler=handle_message,
+        result_handler=deliver_scheduled_result,
+        db=db,
+        timezone=settings.timezone,
+    )
 
     # Start all adapters
     for adapter in adapters:
         await adapter.start()
     if wechat_multi_tenant is not None:
         await wechat_multi_tenant.start()
+    scheduler.start()
 
     # ── Web server ────────────────────────────────────────────────────────────
     if settings.web_enabled:

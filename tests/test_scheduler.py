@@ -15,17 +15,22 @@ from xclaw.scheduler import TaskScheduler
 
 def _make_scheduler(
     handler=None,
+    result_handler=None,
     db=None,
     after_market_enabled=False,
     after_market_chat_ids=None,
 ) -> TaskScheduler:
     if handler is None:
         handler = AsyncMock(return_value="reply")
+    if result_handler is None:
+        result_handler = AsyncMock()
     if db is None:
         db = MagicMock()
         db.get_active_tasks = AsyncMock(return_value=[])
+        db.update_task_status = AsyncMock()
     return TaskScheduler(
         message_handler=handler,
+        result_handler=result_handler,
         db=db,
         timezone="Asia/Shanghai",
         after_market_push_enabled=after_market_enabled,
@@ -123,6 +128,7 @@ async def test_run_due_db_tasks_with_cron():
     }
     db = MagicMock()
     db.get_active_tasks = AsyncMock(return_value=[task])
+    db.update_task_status = AsyncMock()
 
     sched = _make_scheduler(db=db)
     sched.start()
@@ -153,6 +159,27 @@ async def test_schedule_from_db_row_once():
     sched.schedule_from_db_row(task)
     job = sched._scheduler.get_job("db_task_5")
     assert job is not None
+    sched.stop()
+
+
+@pytest.mark.asyncio
+async def test_schedule_from_db_row_once_naive_time_uses_local_timezone():
+    task = {
+        "id": 6,
+        "chat_id": 10,
+        "description": "once-local",
+        "prompt": "一次性任务",
+        "cron_expression": "",
+        "next_run_at": "2099-03-27 15:00",
+        "status": "active",
+    }
+    sched = _make_scheduler()
+    sched.start()
+    sched.schedule_from_db_row(task)
+    job = sched._scheduler.get_job("db_task_6")
+    assert job is not None
+    assert job.next_run_time.hour == 15
+    assert job.next_run_time.utcoffset().total_seconds() == 8 * 3600
     sched.stop()
 
 
@@ -217,6 +244,87 @@ async def test_run_after_market_push_handler_error_does_not_raise():
         after_market_chat_ids=["chat_x"],
     )
     await sched._run_after_market_push()  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_run_due_db_tasks_marks_past_once_task_missed():
+    task = {
+        "id": 8,
+        "chat_id": 42,
+        "description": "past once",
+        "prompt": "错过了",
+        "cron_expression": "",
+        "next_run_at": "2000-01-01 15:00",
+        "status": "active",
+    }
+    db = MagicMock()
+    db.get_active_tasks = AsyncMock(return_value=[task])
+    db.update_task_status = AsyncMock()
+
+    sched = _make_scheduler(db=db)
+    sched.start()
+    await sched._run_due_db_tasks()
+
+    db.update_task_status.assert_awaited_once_with(8, "missed")
+    assert sched._scheduler.get_job("db_task_8") is None
+    sched.stop()
+
+
+@pytest.mark.asyncio
+async def test_once_task_runs_result_handler_and_marks_completed():
+    handler = AsyncMock(return_value="reply")
+    result_handler = AsyncMock()
+    db = MagicMock()
+    db.get_active_tasks = AsyncMock(return_value=[])
+    db.update_task_status = AsyncMock()
+
+    task = {
+        "id": 11,
+        "chat_id": 10,
+        "description": "once",
+        "prompt": "一次性任务",
+        "cron_expression": "",
+        "next_run_at": "2099-01-01 15:00+08:00",
+        "status": "active",
+    }
+    sched = _make_scheduler(handler=handler, result_handler=result_handler, db=db)
+    sched.start()
+    sched.schedule_from_db_row(task)
+
+    job = sched._scheduler.get_job("db_task_11")
+    assert job is not None
+    await job.func()
+
+    handler.assert_awaited_once_with("10", "一次性任务", "scheduler")
+    result_handler.assert_awaited_once_with(task, "reply")
+    db.update_task_status.assert_awaited_once_with(11, "completed")
+    assert sched._scheduler.get_job("db_task_11") is None
+    sched.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_due_db_tasks_removes_non_active_jobs():
+    db = MagicMock()
+    db.get_active_tasks = AsyncMock(return_value=[])
+    db.update_task_status = AsyncMock()
+    sched = _make_scheduler(db=db)
+    sched.start()
+    sched.schedule_from_db_row(
+        {
+            "id": 12,
+            "chat_id": 1,
+            "description": "to-remove",
+            "prompt": "test",
+            "cron_expression": "0 9 * * *",
+            "next_run_at": None,
+            "status": "active",
+        }
+    )
+    assert sched._scheduler.get_job("db_task_12") is not None
+
+    await sched._run_due_db_tasks()
+    assert sched._scheduler.get_job("db_task_12") is None
+    sched.stop()
 
 
 @pytest.mark.asyncio

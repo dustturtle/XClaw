@@ -29,6 +29,10 @@ _INDEX_CODES = (
     ("沪深300", "sh000300"),
     ("中证500", "sh000905"),
 )
+# Bare 6-digit code → prefixed index code (e.g. "000001" → "sh000001")
+_INDEX_BARE_TO_PREFIXED: dict[str, str] = {
+    code[2:]: code for _, code in _INDEX_CODES
+}
 _BAOSTOCK_LOCK = threading.Lock()
 
 

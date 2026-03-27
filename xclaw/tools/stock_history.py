@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from xclaw.datasources.a_share import fetch_cn_history_dataframe
+from xclaw.datasources.a_share import (
+    _INDEX_BARE_TO_PREFIXED,
+    fetch_cn_history_dataframe,
+)
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 
 
@@ -17,7 +20,10 @@ class StockHistoryTool(Tool):
 
     @property
     def description(self) -> str:
-        return "获取股票历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量。"
+        return (
+            "获取股票或指数历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量。"
+            "查询指数（如上证指数、深证成指）时请将 asset_type 设为 index。"
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -52,6 +58,12 @@ class StockHistoryTool(Tool):
                     "description": "最多返回条数（默认 30）",
                     "default": 30,
                 },
+                "asset_type": {
+                    "type": "string",
+                    "enum": ["stock", "index"],
+                    "default": "stock",
+                    "description": "资产类型：stock=个股，index=指数。查询指数（如上证指数、沪深300）时必须传 index。",
+                },
             },
             "required": ["symbol"],
         }
@@ -67,7 +79,15 @@ class StockHistoryTool(Tool):
         symbol = params.get("symbol", "").strip()
         market = params.get("market", "CN").upper()
         period = params.get("period", "daily")
+        asset_type = params.get("asset_type", "stock")
         limit = min(int(params.get("limit", 30)), 120)
+
+        # When asset_type is index and a bare 6-digit code is given,
+        # resolve it to the prefixed index code (e.g. 000001 → sh000001)
+        if asset_type == "index" and market == "CN":
+            bare = symbol.upper().replace(".", "").replace("SH", "").replace("SZ", "")
+            if bare in _INDEX_BARE_TO_PREFIXED:
+                symbol = _INDEX_BARE_TO_PREFIXED[bare]
 
         # Date defaults
         end_date = params.get("end_date") or date.today().strftime("%Y-%m-%d")

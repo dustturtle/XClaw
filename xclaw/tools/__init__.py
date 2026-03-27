@@ -38,6 +38,7 @@ class ToolContext:
         settings: Any = None,
         file_memory: Any = None,
         structured_memory: Any = None,
+        scheduler: Any = None,
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -46,6 +47,7 @@ class ToolContext:
         self.settings = settings
         self.file_memory = file_memory
         self.structured_memory = structured_memory
+        self.scheduler = scheduler
 
 
 class Tool(ABC):
