@@ -76,8 +76,11 @@ def _build_system_prompt(
         "回答请使用中文，保持简洁专业。不提供投资建议，仅提供数据分析辅助。",
         (
             "## 工具使用规则\n"
-            "- 单只股票/指数的行情查询、K线数据、技术指标、缺口分析：直接调用对应工具"
-            "（stock_quote / stock_history / stock_indicators），拿到数据后自行分析回答。\n"
+            "- 单只股票/指数的行情查询：优先调用 stock_quote。\n"
+            "- 单只股票/指数的历史K线：优先调用 stock_history。\n"
+            "- 单只股票/指数的技术指标：优先调用 stock_indicators。\n"
+            "- 单只股票/指数的跳空缺口/回补判断：优先调用 stock_gap_analysis，"
+            "不要根据 stock_history 返回的K线自行手算缺口。\n"
             "- sub_agent 仅用于需要同时调用多个不同工具、交叉对比多只标的的复杂研究任务。"
             "简单的单工具查询+分析绝不要走 sub_agent。"
         ),
