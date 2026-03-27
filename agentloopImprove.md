@@ -160,3 +160,12 @@ for iteration in range(_max_iter):
 - [x] `sub_agent` description 明确限定"仅用于多步骤、多工具协作的复杂研究任务"，单一数据查询+分析明确要求不要使用 sub_agent
 - [x] `stock_history` description 补充"获取数据后可直接分析，无需再调其他工具"引导模型一步到位
 - [ ] 部署验证"华泰证券最近一个月有缺口没补吗"不再走 sub_agent 路径
+
+### 追加优化（2026-03-27 第三轮）
+
+实测"中信证券最近20个交易日有缺口没补吗"仍被路由到 sub_agent（耗时 110 秒）。两轮 description 调优均未能阻止模型选择 sub_agent，说明在十几个工具并存的场景下，仅靠工具描述引导不足以可靠地影响模型路由决策。
+
+**修复**：在 system prompt 中加入明确的工具使用规则（行为策略级指令，非数据映射）
+
+- [x] system prompt 新增"## 工具使用规则"段落，明确三条路由规则：缺口分析→stock_gap_analysis / 单工具查询→直接调用 / sub_agent 仅限多工具复杂研究
+- [ ] 部署验证"中信证券最近20个交易日有缺口没补吗"直接走 stock_gap_analysis，不经过 sub_agent
