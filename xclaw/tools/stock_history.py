@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from xclaw.datasources.a_share import fetch_cn_history_dataframe
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 
 
@@ -86,26 +87,20 @@ class StockHistoryTool(Tool):
             return ToolResult(content=f"获取历史数据失败: {exc}", is_error=True)
 
     async def _cn_history(self, symbol, period, start_date, end_date, limit, loop) -> ToolResult:
-        import akshare as ak  # type: ignore[import]
-
-        period_map = {"daily": "daily", "weekly": "weekly", "monthly": "monthly"}
-        ak_period = period_map.get(period, "daily")
-        start_fmt = start_date.replace("-", "")
-        end_fmt = end_date.replace("-", "")
-        df = await loop.run_in_executor(
-            None,
-            lambda: ak.stock_zh_a_hist(
-                symbol=symbol,
-                period=ak_period,
-                start_date=start_fmt,
-                end_date=end_fmt,
-                adjust="qfq",  # 前复权
-            ),
+        df = await fetch_cn_history_dataframe(
+            symbol,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
         )
         if df is None or df.empty:
             return ToolResult(content=f"未找到 {symbol} 的历史数据", is_error=True)
         df = df.tail(limit)
-        lines = [f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'成交量':>12}"]
+        source = df.attrs.get("source", "unknown")
+        lines = [
+            f"数据源: {source}",
+            f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'成交量':>12}",
+        ]
         for _, row in df.iterrows():
             lines.append(
                 f"{str(row.get('日期', '')):<12} "

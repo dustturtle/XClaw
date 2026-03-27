@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from xclaw.datasources.a_share import fetch_cn_history_dataframe
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 
 
@@ -71,20 +72,17 @@ class StockIndicatorsTool(Tool):
             df = await self._fetch_data(symbol, market, start_date, end_date, loop)
             if df is None or df.empty:
                 return ToolResult(content=f"无法获取 {symbol} 的历史数据", is_error=True)
-            return self._compute_indicators(df, indicators, symbol)
+            return self._compute_indicators(df, indicators, symbol, df.attrs.get("source"))
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"计算指标失败: {exc}", is_error=True)
 
     async def _fetch_data(self, symbol, market, start_date, end_date, loop):
         if market == "CN":
-            import akshare as ak  # type: ignore[import]
-
-            return await loop.run_in_executor(
-                None,
-                lambda: ak.stock_zh_a_hist(
-                    symbol=symbol, period="daily",
-                    start_date=start_date, end_date=end_date, adjust="qfq"
-                ),
+            return await fetch_cn_history_dataframe(
+                symbol,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
             )
         else:
             import yfinance as yf  # type: ignore[import]
@@ -99,7 +97,7 @@ class StockIndicatorsTool(Tool):
                 df = df.rename(columns={"Open": "开盘", "Close": "收盘", "High": "最高", "Low": "最低", "Volume": "成交量"})
             return df
 
-    def _compute_indicators(self, df, indicators: list[str], symbol: str) -> ToolResult:
+    def _compute_indicators(self, df, indicators: list[str], symbol: str, source: str | None = None) -> ToolResult:
         try:
             import pandas_ta as ta  # type: ignore[import]
         except ImportError:
@@ -110,6 +108,8 @@ class StockIndicatorsTool(Tool):
         low = df["最低"] if "最低" in df.columns else df.get("Low")
 
         lines = [f"=== {symbol} 技术指标分析 ==="]
+        if source:
+            lines.append(f"历史数据源: {source}")
         latest_close = float(close.iloc[-1]) if close is not None else None
         if latest_close:
             lines.append(f"最新收盘价: {latest_close:.2f}")

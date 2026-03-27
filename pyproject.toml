@@ -31,6 +31,8 @@ dependencies = [
     "click>=8.1",
     # Stock data
     "akshare>=1.14",
+    "baostock>=0.8.9",
+    "pytdx>=1.72",
     "yfinance>=0.2",
     # Data analysis
     "pandas>=2.2",

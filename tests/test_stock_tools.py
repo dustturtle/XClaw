@@ -28,26 +28,33 @@ def _ctx(db=None, chat_id=1) -> ToolContext:
 
 @pytest.mark.asyncio
 async def test_stock_quote_cn_success():
-    """stock_quote tool should return formatted CN stock data."""
-    mock_df = pd.DataFrame([{
-        "代码": "600519",
-        "名称": "贵州茅台",
-        "最新价": 1800.0,
-        "涨跌幅": 1.5,
-        "涨跌额": 26.5,
-        "成交量": 1000000,
-        "成交额": 1800000000,
-        "今开": 1790.0,
-        "最高": 1810.0,
-        "最低": 1785.0,
-        "昨收": 1773.5,
-    }])
-    with patch("akshare.stock_zh_a_spot_em", return_value=mock_df):
-        tool = StockQuoteTool()
+    """stock_quote tool should use the direct CN realtime source first."""
+    tool = StockQuoteTool()
+    quote = {
+        "name": "贵州茅台",
+        "symbol": "600519.SH",
+        "price": "1800.0",
+        "change_pct": "1.50%",
+        "change_amount": "26.5",
+        "volume": "10000手",
+        "amount": "180000万元",
+        "open": "1790.0",
+        "high": "1810.0",
+        "low": "1785.0",
+        "pre_close": "1773.5",
+        "quote_time": "2026-03-27 09:30:00",
+        "source": "腾讯直连 HTTP",
+    }
+    with (
+        patch.object(tool, "_fetch_tencent_quote", AsyncMock(return_value=quote)),
+        patch.object(tool, "_fetch_sina_quote", AsyncMock()),
+        patch.object(tool, "_fetch_akshare_quote", AsyncMock()),
+    ):
         result = await tool.execute({"symbol": "600519", "market": "CN"}, _ctx())
     assert not result.is_error
     assert "贵州茅台" in result.content
     assert "1800" in result.content
+    assert "腾讯直连 HTTP" in result.content
 
 
 @pytest.mark.asyncio
@@ -59,28 +66,59 @@ async def test_stock_quote_empty_symbol():
 
 @pytest.mark.asyncio
 async def test_stock_quote_not_found():
-    """When symbol not in DataFrame, should return error."""
-    mock_df = pd.DataFrame([{"代码": "000001", "名称": "平安银行"}])
-    with patch("akshare.stock_zh_a_spot_em", return_value=mock_df):
-        tool = StockQuoteTool()
+    """When symbol is missing in all providers, should return error."""
+    tool = StockQuoteTool()
+    with (
+        patch.object(tool, "_fetch_tencent_quote", AsyncMock(return_value=None)),
+        patch.object(tool, "_fetch_sina_quote", AsyncMock(return_value=None)),
+        patch.object(tool, "_fetch_akshare_quote", AsyncMock(return_value=None)),
+    ):
         result = await tool.execute({"symbol": "999999", "market": "CN"}, _ctx())
     assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_stock_quote_cn_falls_back_to_sina():
+    tool = StockQuoteTool()
+    quote = {
+        "name": "贵州茅台",
+        "symbol": "600519.SH",
+        "price": "1409.49",
+        "change_pct": "0.59%",
+        "change_amount": "8.31",
+        "volume": "695552股",
+        "amount": "979365126.000元",
+        "open": "1400.000",
+        "high": "1414.990",
+        "low": "1396.660",
+        "pre_close": "1401.180",
+        "quote_time": "2026-03-27 09:53:33",
+        "source": "新浪直连 HTTP",
+    }
+    with (
+        patch.object(tool, "_fetch_tencent_quote", AsyncMock(side_effect=RuntimeError("timeout"))),
+        patch.object(tool, "_fetch_sina_quote", AsyncMock(return_value=quote)),
+        patch.object(tool, "_fetch_akshare_quote", AsyncMock()),
+    ):
+        result = await tool.execute({"symbol": "600519", "market": "CN"}, _ctx())
+    assert not result.is_error
+    assert "新浪直连 HTTP" in result.content
 
 
 # ── stock_history ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_stock_history_cn():
-    from datetime import date
-
     mock_df = pd.DataFrame([
         {"日期": "2024-01-01", "开盘": 1780.0, "收盘": 1800.0, "最高": 1810.0, "最低": 1775.0, "成交量": 1000000},
         {"日期": "2024-01-02", "开盘": 1800.0, "收盘": 1820.0, "最高": 1830.0, "最低": 1795.0, "成交量": 1200000},
     ])
-    with patch("akshare.stock_zh_a_hist", return_value=mock_df):
+    mock_df.attrs["source"] = "baostock"
+    with patch("xclaw.tools.stock_history.fetch_cn_history_dataframe", AsyncMock(return_value=mock_df)):
         tool = StockHistoryTool()
         result = await tool.execute({"symbol": "600519", "market": "CN", "limit": 5}, _ctx())
     assert not result.is_error
+    assert "baostock" in result.content
     assert "1800" in result.content
 
 
@@ -105,7 +143,8 @@ async def test_stock_indicators_cn():
         "最低": [p - 1 for p in prices],
         "成交量": [1000000] * 60,
     })
-    with patch("akshare.stock_zh_a_hist", return_value=mock_df):
+    mock_df.attrs["source"] = "baostock"
+    with patch("xclaw.tools.stock_indicators.fetch_cn_history_dataframe", AsyncMock(return_value=mock_df)):
         tool = StockIndicatorsTool()
         result = await tool.execute(
             {"symbol": "600519", "market": "CN", "indicators": ["MA", "RSI"]},
@@ -135,21 +174,23 @@ async def test_stock_fundamentals_cn():
 
 @pytest.mark.asyncio
 async def test_market_overview():
-    mock_index = pd.DataFrame([
-        {"名称": "上证指数", "最新价": 3000.0, "涨跌幅": 0.5},
-        {"名称": "深证成指", "最新价": 10000.0, "涨跌幅": -0.3},
-    ])
-    mock_sector = pd.DataFrame([
-        {"板块名称": "新能源", "涨跌幅": 3.5},
-        {"板块名称": "医疗", "涨跌幅": 2.1},
-        {"板块名称": "消费", "涨跌幅": 1.8},
-        {"板块名称": "地产", "涨跌幅": -2.5},
-        {"板块名称": "钢铁", "涨跌幅": -3.1},
-        {"板块名称": "化工", "涨跌幅": -0.5},
-    ])
+    mock_index = [
+        {"name": "上证指数", "price": "3000.0", "change_pct": "0.5"},
+        {"name": "深证成指", "price": "10000.0", "change_pct": "-0.3"},
+    ]
+    mock_sector = {
+        "top": [
+            {"name": "新能源", "change_pct": "3.5"},
+            {"name": "医疗", "change_pct": "2.1"},
+        ],
+        "bottom": [
+            {"name": "地产", "change_pct": "-2.5"},
+            {"name": "钢铁", "change_pct": "-3.1"},
+        ],
+    }
     with (
-        patch("akshare.stock_zh_index_spot_em", return_value=mock_index),
-        patch("akshare.stock_board_industry_name_em", return_value=mock_sector),
+        patch("xclaw.tools.market_overview.fetch_cn_index_quotes", AsyncMock(return_value=mock_index)),
+        patch("xclaw.tools.market_overview.fetch_cn_sector_snapshots", AsyncMock(return_value=mock_sector)),
     ):
         tool = MarketOverviewTool()
         result = await tool.execute({"include_sectors": True}, _ctx())

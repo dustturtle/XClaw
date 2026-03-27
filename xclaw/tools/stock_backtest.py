@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from xclaw.datasources.a_share import fetch_cn_history_dataframe
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 
 
@@ -151,22 +152,15 @@ class StockBacktestTool(Tool):
         self, symbol: str, market: str, start_date: str, end_date: str, loop: Any
     ) -> list[float]:
         if market == "CN":
-            import akshare as ak  # type: ignore[import]
-            start_fmt = start_date.replace("-", "")
-            end_fmt = end_date.replace("-", "")
-            df = await loop.run_in_executor(
-                None,
-                lambda: ak.stock_zh_a_hist(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start_fmt,
-                    end_date=end_fmt,
-                    adjust="qfq",
-                ),
+            df = await fetch_cn_history_dataframe(
+                symbol,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
             )
             if df is None or df.empty:
                 raise ValueError(f"No data for {symbol}")
-            return [float(v) for v in df["收盘"].tolist()]
+            return [float(v) for v in df["收盘"].dropna().tolist()]
         else:
             import yfinance as yf  # type: ignore[import]
             yf_symbol = f"{symbol}.HK" if market == "HK" and not symbol.endswith(".HK") else symbol
