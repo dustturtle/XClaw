@@ -322,6 +322,12 @@ wechat_invite_refresh_seconds: 45
 wechat_invite_session_total_timeout_seconds: 90
 ```
 
+注意事项：
+
+- 当前 iLink 微信请求会继承启动进程所在环境的系统代理配置，例如 `HTTP_PROXY`、`HTTPS_PROXY`
+- 如果本机代理开启但无法正确访问 `https://ilinkai.weixin.qq.com`，可能影响二维码获取、扫码状态轮询、长轮询收消息和消息回复
+- 如果微信链路出现“服务已启动但长时间不回复”或扫码流程异常，建议先检查启动 XClaw 的终端 / IDE / 系统服务环境里是否注入了代理变量
+
 常用接口：
 
 - `POST /api/auth/wechat/start`：开始登录，返回 `login_id` 与二维码 SVG

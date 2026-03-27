@@ -41,6 +41,8 @@ dingtalk_app_secret: ""
 dingtalk_robot_code: ""
 
 # 微信（iLink 二维码登录 + 私聊 Bot）
+# 注意：当前 iLink 请求会继承启动进程的系统代理环境（如 HTTP_PROXY / HTTPS_PROXY）。
+# 如遇扫码、轮询或回复异常，请先检查代理设置是否影响 ilinkai.weixin.qq.com。
 wechat_enabled: false
 wechat_base_url: "https://ilinkai.weixin.qq.com"
 wechat_qr_total_timeout_seconds: 480
