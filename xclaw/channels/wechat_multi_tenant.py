@@ -273,6 +273,7 @@ def build_invite_page(public_token: str) -> str:
     let currentSessionId = "";
     let refreshTimer = null;
     let pollTimer = null;
+    let isRefreshing = false;
     const statusEl = document.getElementById("status");
     const qrBoxEl = document.getElementById("qr-box");
     const refreshBtn = document.getElementById("refresh-btn");
@@ -294,6 +295,7 @@ def build_invite_page(public_token: str) -> str:
 
     async function startSession() {{
       stopTimers();
+      isRefreshing = false;
       setStatus("正在生成二维码...");
       const response = await fetch(`/api/invite/${{publicToken}}/sessions`, {{
         method: "POST",
@@ -312,22 +314,32 @@ def build_invite_page(public_token: str) -> str:
     }}
 
     async function refreshSession() {{
+      if (isRefreshing) {{
+        return;
+      }}
+      stopTimers();
       if (!currentSessionId) {{
         return startSession();
       }}
-      const response = await fetch(`/api/invite/sessions/${{currentSessionId}}/refresh`, {{
-        method: "POST",
-        headers: {{ "Accept": "application/json" }},
-      }});
-      if (!response.ok) {{
-        return startSession();
+      isRefreshing = true;
+      try {{
+        const response = await fetch(`/api/invite/sessions/${{currentSessionId}}/refresh`, {{
+          method: "POST",
+          headers: {{ "Accept": "application/json" }},
+        }});
+        if (!response.ok) {{
+          isRefreshing = false;
+          return startSession();
+        }}
+        const payload = await response.json();
+        currentSessionId = payload.invite_session_id;
+        qrBoxEl.innerHTML = payload.qr_svg;
+        setStatus("二维码已刷新，请重新扫码。");
+        refreshTimer = setTimeout(refreshSession, payload.refresh_after_ms);
+        pollStatus();
+      }} finally {{
+        isRefreshing = false;
       }}
-      const payload = await response.json();
-      currentSessionId = payload.invite_session_id;
-      qrBoxEl.innerHTML = payload.qr_svg;
-      setStatus("二维码已刷新，请重新扫码。");
-      refreshTimer = setTimeout(refreshSession, payload.refresh_after_ms);
-      pollStatus();
     }}
 
     async function pollStatus() {{
@@ -361,6 +373,7 @@ def build_invite_page(public_token: str) -> str:
 
     function showError(err) {{
       console.error(err);
+      isRefreshing = false;
       setStatus(err.message || "生成二维码失败，请稍后再试。");
       if (!qrBoxEl.innerHTML || qrBoxEl.textContent === "准备中…") {{
         qrBoxEl.textContent = "暂时无法生成二维码";
