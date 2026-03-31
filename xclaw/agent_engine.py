@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from loguru import logger
@@ -71,8 +72,12 @@ def _build_system_prompt(
     file_memory_content: str = "",
 ) -> str:
     """Assemble the system prompt from static instructions + injected memories."""
+    _tz_sh = timezone(timedelta(hours=8))
+    _now = datetime.now(_tz_sh)
     parts = [
         "你是 XClaw，一个智能投资助手和任务处理 Agent。",
+        f"当前时间：{_now.strftime('%Y-%m-%d %H:%M')}（Asia/Shanghai，UTC+8）。"
+        "涉及日期计算时请以此为准。",
         "你能够帮助用户查询股票行情、分析技术指标、管理自选股和持仓、以及处理通用任务。",
         "回答请使用中文，保持简洁专业。不提供投资建议，仅提供数据分析辅助。",
         (
