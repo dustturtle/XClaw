@@ -280,6 +280,13 @@ class Database:
             return None
         return json.loads(row["messages_json"])
 
+    async def clear_session(self, chat_id: int) -> None:
+        await self.conn.execute(
+            "DELETE FROM sessions WHERE chat_id = ?",
+            (chat_id,),
+        )
+        await self.conn.commit()
+
     # ── Memories ──────────────────────────────────────────────────────────────
 
     async def add_memory(

@@ -6,6 +6,7 @@ from typing import Any
 
 from xclaw.datasources.a_share import fetch_cn_history_dataframe
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
+from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
 
 class StockIndicatorsTool(Tool):
@@ -88,7 +89,7 @@ class StockIndicatorsTool(Tool):
             import yfinance as yf  # type: ignore[import]
             from datetime import date, timedelta
 
-            yf_symbol = f"{symbol}.HK" if market == "HK" and not symbol.endswith(".HK") else symbol
+            yf_symbol = normalize_hk_yf_symbol(symbol) if market == "HK" else symbol
             s = start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:]
             e = end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
             ticker = yf.Ticker(yf_symbol)

@@ -54,6 +54,17 @@ async def test_load_missing_session_returns_none(db: Database):
 
 
 @pytest.mark.asyncio
+async def test_clear_session(db: Database):
+    chat_id = await db.get_or_create_chat("web", "clear_session_user")
+    session_data = [{"role": "user", "content": "Test"}]
+    await db.save_session(chat_id, session_data)
+    assert await db.load_session(chat_id) == session_data
+
+    await db.clear_session(chat_id)
+    assert await db.load_session(chat_id) is None
+
+
+@pytest.mark.asyncio
 async def test_memories_crud(db: Database):
     chat_id = await db.get_or_create_chat("web", "mem_user")
     mid = await db.add_memory(chat_id, "用户喜欢价值投资", category="偏好")

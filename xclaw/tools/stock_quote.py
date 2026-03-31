@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
+from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
 
 class StockQuoteTool(Tool):
@@ -95,14 +96,15 @@ class StockQuoteTool(Tool):
 
         import yfinance as yf  # type: ignore[import]
 
-        # Adjust symbol for HK market
-        yf_symbol = f"{symbol}.HK" if market == "HK" and not symbol.endswith(".HK") else symbol
+        yf_symbol = normalize_hk_yf_symbol(symbol) if market == "HK" else symbol
         loop = asyncio.get_event_loop()
         ticker = await loop.run_in_executor(None, lambda: yf.Ticker(yf_symbol))
         info = await loop.run_in_executor(None, lambda: ticker.info)  # type: ignore[union-attr]
 
         current_price = info.get("currentPrice") or info.get("regularMarketPrice", "N/A")
         prev_close = info.get("previousClose", "N/A")
+        if current_price == "N/A" and prev_close == "N/A" and not info.get("shortName"):
+            return ToolResult(content=f"未找到 {yf_symbol} 的行情数据", is_error=True)
         change_pct = (
             f"{((current_price - prev_close) / prev_close * 100):.2f}%"
             if isinstance(current_price, (int, float)) and isinstance(prev_close, (int, float))

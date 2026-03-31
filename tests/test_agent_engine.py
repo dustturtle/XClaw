@@ -136,6 +136,26 @@ async def test_quick_memory_path(db: Database, tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_reset_command_clears_session_without_calling_llm(db: Database, tmp_path: Path):
+    chat_id = await db.get_or_create_chat("web", "reset_user")
+    await db.save_session(chat_id, [{"role": "user", "content": "旧上下文"}])
+
+    llm = MockLLMProvider([])  # Should not be called
+    file_memory = FileMemory(tmp_path / "groups")
+    struct_memory = StructuredMemory(db)
+    tools = ToolRegistry()
+    ctx = AgentContext(
+        chat_id=chat_id, channel="web", db=db, llm=llm,
+        tools=tools, file_memory=file_memory, structured_memory=struct_memory,
+    )
+
+    reply = await agent_loop(ctx, "/reset")
+    assert "上下文已重置" in reply
+    assert len(llm._calls) == 0
+    assert await db.load_session(chat_id) is None
+
+
+@pytest.mark.asyncio
 async def test_tool_call_loop(db: Database, tmp_path: Path):
     """Agent loop should execute a tool and pass result back to LLM."""
     chat_id = await db.get_or_create_chat("web", "tool_loop_user")

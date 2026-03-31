@@ -9,6 +9,7 @@ from xclaw.datasources.a_share import (
     fetch_cn_history_dataframe,
 )
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
+from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
 
 class StockHistoryTool(Tool):
@@ -147,7 +148,7 @@ class StockHistoryTool(Tool):
     async def _yf_history(self, symbol, market, period, start_date, end_date, limit, loop) -> ToolResult:
         import yfinance as yf  # type: ignore[import]
 
-        yf_symbol = f"{symbol}.HK" if market == "HK" and not symbol.endswith(".HK") else symbol
+        yf_symbol = normalize_hk_yf_symbol(symbol) if market == "HK" else symbol
         period_map = {"daily": "1d", "weekly": "1wk", "monthly": "1mo"}
         yf_interval = period_map.get(period, "1d")
         ticker = yf.Ticker(yf_symbol)

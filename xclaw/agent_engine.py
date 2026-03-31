@@ -24,6 +24,7 @@ from xclaw.tools import ToolContext, ToolRegistry
 
 # Pattern to detect "记住..." / "remember..." quick-memory commands
 _MEMORY_PATTERN = re.compile(r"^(?:记住|remember)[：:]\s*(.+)", re.IGNORECASE | re.DOTALL)
+_RESET_PATTERN = re.compile(r"^/reset\s*$", re.IGNORECASE)
 _EMPTY_REPLY_FALLBACK = "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
 _MICRO_COMPACT_KEEP_RECENT_TOOL_RESULTS = 3
 _MICRO_COMPACT_PLACEHOLDER = "[已处理的工具结果，原内容已压缩]"
@@ -230,7 +231,17 @@ async def agent_loop(
     _keep_recent = settings.compact_keep_recent if settings else 20
 
     # ── 1. Quick memory path ────────────────────────────────────────────────
-    m = _MEMORY_PATTERN.match(user_message.strip())
+    stripped_message = user_message.strip()
+    if _RESET_PATTERN.match(stripped_message):
+        reply = "当前会话上下文已重置。后续消息将从干净上下文重新开始。"
+        if not ctx.skip_session_persistence:
+            await ctx.db.clear_session(ctx.chat_id)
+        if not ctx.skip_message_persistence:
+            await ctx.db.save_message(ctx.chat_id, "user", user_message)
+            await ctx.db.save_message(ctx.chat_id, "assistant", reply)
+        return reply
+
+    m = _MEMORY_PATTERN.match(stripped_message)
     if m and ctx.structured_memory:
         fact = m.group(1).strip()
         await ctx.structured_memory.add(ctx.chat_id, fact)

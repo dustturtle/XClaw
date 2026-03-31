@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from xclaw.tools import ToolContext, ToolResult
+from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 from xclaw.tools.market_overview import MarketOverviewTool
 from xclaw.tools.portfolio import PortfolioManageTool
 from xclaw.tools.stock_fundamentals import StockFundamentalsTool
@@ -104,6 +105,15 @@ async def test_stock_quote_cn_falls_back_to_sina():
         result = await tool.execute({"symbol": "600519", "market": "CN"}, _ctx())
     assert not result.is_error
     assert "新浪直连 HTTP" in result.content
+
+
+def test_normalize_hk_yf_symbol():
+    assert normalize_hk_yf_symbol("00700") == "0700.HK"
+    assert normalize_hk_yf_symbol("00700.HK") == "0700.HK"
+    assert normalize_hk_yf_symbol("700") == "0700.HK"
+    assert normalize_hk_yf_symbol("09992") == "9992.HK"
+    assert normalize_hk_yf_symbol("09992.HK") == "9992.HK"
+    assert normalize_hk_yf_symbol("9992.HK") == "9992.HK"
 
 
 # ── stock_history ─────────────────────────────────────────────────────────────
