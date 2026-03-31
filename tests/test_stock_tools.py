@@ -181,6 +181,34 @@ async def test_stock_history_stock_bare_code_not_resolved():
 
 
 @pytest.mark.asyncio
+async def test_stock_history_output_contains_precomputed_chg_and_amp():
+    """Output should include pre-computed 涨跌幅 and 振幅 columns."""
+    mock_df = pd.DataFrame([
+        {"日期": "2024-01-01", "开盘": 1780.0, "收盘": 1800.0, "最高": 1810.0, "最低": 1775.0, "成交量": 1000000},
+        {"日期": "2024-01-02", "开盘": 1805.0, "收盘": 1820.0, "最高": 1830.0, "最低": 1795.0, "成交量": 1200000},
+        {"日期": "2024-01-03", "开盘": 1815.0, "收盘": 1810.0, "最高": 1825.0, "最低": 1800.0, "成交量": 1100000},
+    ])
+    mock_df.attrs["source"] = "baostock"
+    with patch("xclaw.tools.stock_history.fetch_cn_history_dataframe", AsyncMock(return_value=mock_df)):
+        tool = StockHistoryTool()
+        result = await tool.execute({"symbol": "600519", "market": "CN", "limit": 10}, _ctx())
+    assert not result.is_error
+    content = result.content
+    # Header should contain new columns
+    assert "涨跌幅" in content
+    assert "振幅" in content
+    # First data row (no previous close) should show "-"
+    lines = content.strip().split("\n")
+    data_lines = [l for l in lines if l.startswith("2024")]
+    assert len(data_lines) == 3
+    assert "-" in data_lines[0]  # first row has no prev close
+    # Second row: (1820-1800)/1800 = +1.11%
+    assert "+1.11%" in data_lines[1]
+    # Third row: (1810-1820)/1820 = -0.55%
+    assert "-0.55%" in data_lines[2]
+
+
+@pytest.mark.asyncio
 async def test_stock_gap_analysis_does_not_false_positive_on_overlap_dates():
     mock_df = pd.DataFrame([
         {"日期": "2026-03-16", "开盘": 19.66, "收盘": 19.48, "最高": 19.67, "最低": 19.28, "成交量": 1},

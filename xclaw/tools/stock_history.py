@@ -21,7 +21,8 @@ class StockHistoryTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "获取股票或指数历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量。"
+            "获取股票或指数历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量，"
+            "以及已预计算的涨跌幅(%)和振幅(%)，无需手动计算涨跌幅。"
             "查询指数（如上证指数、深证成指）时请将 asset_type 设为 index。"
             "如需判断跳空缺口，请优先使用 stock_gap_analysis 工具，不要自行根据K线手算。"
         )
@@ -116,19 +117,29 @@ class StockHistoryTool(Tool):
         )
         if df is None or df.empty:
             return ToolResult(content=f"未找到 {symbol} 的历史数据", is_error=True)
-        df = df.tail(limit)
+        # Compute derived metrics on full DataFrame before truncating
         source = df.attrs.get("source", "unknown")
+        prev_close = df["收盘"].shift(1)
+        df["涨跌幅"] = (df["收盘"] - prev_close) / prev_close * 100
+        df["振幅"] = (df["最高"] - df["最低"]) / prev_close * 100
+        df = df.tail(limit)
         lines = [
             f"数据源: {source}",
-            f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'成交量':>12}",
+            f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'涨跌幅':>8} {'振幅':>8} {'成交量':>12}",
         ]
         for _, row in df.iterrows():
+            chg = row.get("涨跌幅")
+            amp = row.get("振幅")
+            chg_str = f"{chg:>+7.2f}%" if chg == chg else "       -"  # NaN check
+            amp_str = f"{amp:>7.2f}%" if amp == amp else "       -"
             lines.append(
                 f"{str(row.get('日期', '')):<12} "
                 f"{row.get('开盘', 0):>8.2f} "
                 f"{row.get('收盘', 0):>8.2f} "
                 f"{row.get('最高', 0):>8.2f} "
                 f"{row.get('最低', 0):>8.2f} "
+                f"{chg_str} "
+                f"{amp_str} "
                 f"{row.get('成交量', 0):>12,.0f}"
             )
         return ToolResult(content="\n".join(lines))
@@ -146,15 +157,25 @@ class StockHistoryTool(Tool):
         )
         if df is None or df.empty:
             return ToolResult(content=f"未找到 {yf_symbol} 的历史数据", is_error=True)
+        # Compute derived metrics on full DataFrame before truncating
+        prev_close = df["Close"].shift(1)
+        df["ChgPct"] = (df["Close"] - prev_close) / prev_close * 100
+        df["Amp"] = (df["High"] - df["Low"]) / prev_close * 100
         df = df.tail(limit)
-        lines = [f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'成交量':>12}"]
+        lines = [f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'涨跌幅':>8} {'振幅':>8} {'成交量':>12}"]
         for idx, row in df.iterrows():
+            chg = row.get("ChgPct")
+            amp = row.get("Amp")
+            chg_str = f"{chg:>+7.2f}%" if chg == chg else "       -"  # NaN check
+            amp_str = f"{amp:>7.2f}%" if amp == amp else "       -"
             lines.append(
                 f"{str(idx)[:10]:<12} "
                 f"{row.get('Open', 0):>8.2f} "
                 f"{row.get('Close', 0):>8.2f} "
                 f"{row.get('High', 0):>8.2f} "
                 f"{row.get('Low', 0):>8.2f} "
+                f"{chg_str} "
+                f"{amp_str} "
                 f"{row.get('Volume', 0):>12,.0f}"
             )
         return ToolResult(content="\n".join(lines))
