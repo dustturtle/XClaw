@@ -426,3 +426,38 @@ async def test_stock_zt_pool_default_date():
     date_arg = call_args[1].get("date") if call_args[1] else call_args[0][0] if call_args[0] else None
     # The date should be set (not empty)
     assert date_arg is not None and len(date_arg) == 8
+
+
+# ── datasource provider timeout failover ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_cn_history_timeout_failover():
+    """If the first provider hangs, it should time out and failover to the next."""
+    import asyncio
+    import time
+    from xclaw.datasources.a_share import fetch_cn_history_dataframe, _PROVIDER_TIMEOUT_SECONDS
+
+    good_df = pd.DataFrame([
+        {"日期": "2024-01-02", "开盘": 100.0, "收盘": 105.0, "最高": 106.0, "最低": 99.0, "成交量": 10000, "成交额": 1000000},
+    ])
+
+    def hanging_provider(*args, **kwargs):
+        """Simulate a provider that hangs forever (like baostock socket stuck)."""
+        time.sleep(60)
+
+    def good_provider(*args, **kwargs):
+        return good_df
+
+    with (
+        patch("xclaw.datasources.a_share._history_from_pytdx", side_effect=hanging_provider),
+        patch("xclaw.datasources.a_share._history_from_baostock", side_effect=good_provider),
+        patch("xclaw.datasources.a_share._PROVIDER_TIMEOUT_SECONDS", 0.5),
+    ):
+        start = time.monotonic()
+        df = await fetch_cn_history_dataframe("600519", period="daily", start_date="2024-01-01", end_date="2024-01-31")
+        elapsed = time.monotonic() - start
+
+    assert df is not None and not df.empty
+    # Should have timed out the hanging provider and got data from the second one.
+    # Total time should be close to the timeout, not 60 seconds.
+    assert elapsed < 5.0

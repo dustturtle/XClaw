@@ -15,6 +15,8 @@ import pandas as pd
 
 
 _CN_HTTP_TIMEOUT_SECONDS = 3.0
+_PROVIDER_TIMEOUT_SECONDS = 15.0
+_BAOSTOCK_LOCK_TIMEOUT_SECONDS = 20.0
 _BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 _TDX_SERVERS = (
     ("218.75.126.9", 7709),
@@ -87,15 +89,22 @@ async def fetch_cn_history_dataframe(
     normalized = normalize_cn_symbol(symbol)
     loop = asyncio.get_running_loop()
     providers = (
-        ("baostock", lambda: _history_from_baostock(normalized, period, start_date, end_date)),
         ("pytdx", lambda: _history_from_pytdx(normalized, period, start_date, end_date)),
+        ("baostock", lambda: _history_from_baostock(normalized, period, start_date, end_date)),
         ("yfinance", lambda: _history_from_yfinance(normalized, period, start_date, end_date)),
         ("akshare", lambda: _history_from_akshare(normalized, period, start_date, end_date)),
     )
     errors: list[str] = []
     for source, producer in providers:
         try:
-            df = await loop.run_in_executor(None, producer)
+            df = await asyncio.wait_for(
+                loop.run_in_executor(None, producer),
+                timeout=_PROVIDER_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"A-share history provider {source} timed out after {_PROVIDER_TIMEOUT_SECONDS}s")
+            errors.append(f"{source}: timeout")
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"A-share history provider {source} failed: {exc}")
             errors.append(f"{source}: {exc}")
@@ -213,7 +222,9 @@ def _history_from_baostock(
 
     frequency_map = {"daily": "d", "weekly": "w", "monthly": "m"}
     frequency = frequency_map.get(period, "d")
-    with _BAOSTOCK_LOCK:
+    if not _BAOSTOCK_LOCK.acquire(timeout=_BAOSTOCK_LOCK_TIMEOUT_SECONDS):
+        raise RuntimeError("baostock lock acquire timed out, another request is stuck")
+    try:
         login = bs.login()
         if login.error_code != "0":
             raise RuntimeError(login.error_msg or "baostock login failed")
@@ -234,6 +245,8 @@ def _history_from_baostock(
         finally:
             with contextlib.suppress(Exception):
                 bs.logout()
+    finally:
+        _BAOSTOCK_LOCK.release()
     return pd.DataFrame(rows, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"])
 
 
