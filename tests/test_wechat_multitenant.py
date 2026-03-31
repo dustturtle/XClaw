@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from xclaw.channels.wechat import IlinkGetUpdatesResponse, IlinkWireMessage, QRCodeResponse, QRStatusResponse
+from xclaw.channels.wechat import IlinkGetConfigResponse, IlinkGetUpdatesResponse, IlinkWireMessage, QRCodeResponse, QRStatusResponse
 from xclaw.channels.wechat_multi_tenant import WeChatMultiTenantService, build_member_chat_id
 from xclaw.channels.web import create_web_app
 from xclaw.db import Database
@@ -21,6 +21,7 @@ class FakeIlinkClient:
         self.status_by_qr: dict[str, QRStatusResponse] = {}
         self.updates_by_token: dict[str, list[IlinkGetUpdatesResponse]] = {}
         self.sent_messages: list[dict[str, str]] = []
+        self.typing_calls: list[dict[str, str]] = []
         self.closed = False
 
     async def fetch_qrcode(self, base_url: str) -> QRCodeResponse:
@@ -64,6 +65,26 @@ class FakeIlinkClient:
             }
         )
         return {"ret": 0}
+
+    async def get_config(
+        self, base_url: str, token: str,
+    ) -> IlinkGetConfigResponse:
+        return IlinkGetConfigResponse(ret=0, typing_ticket="fake-ticket")
+
+    async def send_typing(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None:
+        self.typing_calls.append(
+            {
+                "token": token,
+                "to_user_id": to_user_id,
+                "typing_ticket": typing_ticket,
+            }
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -258,9 +279,112 @@ async def test_multitenant_manager_isolates_member_chat_ids(db: Database) -> Non
     )
     assert ilink_client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
     assert ilink_client.sent_messages[1]["to_user_id"] == "bob@im.wechat"
+    assert len(ilink_client.typing_calls) == 2
 
     await service.stop()
     assert ilink_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_multitenant_typing_failure_invalidates_cached_ticket(db: Database) -> None:
+    ilink_client = FakeIlinkClient()
+    handler = AsyncMock(return_value="ok")
+    service = _make_service(db, ilink_client=ilink_client, handler=handler)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-a",
+        qr_content="https://example.com/a.png",
+        ttl_seconds=90,
+    )
+    _, member, credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-1",
+        ilink_bot_id="bot-1",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-a",
+    )
+
+    ilink_client.updates_by_token["token-1"] = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-1",
+            msgs=[
+                _make_text_message(
+                    "hello",
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-a",
+                    message_id="m-1",
+                )
+            ],
+        ),
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-2",
+            msgs=[
+                _make_text_message(
+                    "again",
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-a",
+                    message_id="m-2",
+                )
+            ],
+        ),
+    ]
+
+    original_get_config = ilink_client.get_config
+    get_config_calls = 0
+
+    async def counting_get_config(base_url: str, token: str) -> IlinkGetConfigResponse:
+        nonlocal get_config_calls
+        get_config_calls += 1
+        return await original_get_config(base_url, token)
+
+    send_typing_calls = 0
+
+    async def flaky_send_typing(
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None:
+        nonlocal send_typing_calls
+        send_typing_calls += 1
+        if send_typing_calls == 1:
+            raise RuntimeError("expired ticket")
+        ilink_client.typing_calls.append(
+            {
+                "token": token,
+                "to_user_id": to_user_id,
+                "typing_ticket": typing_ticket,
+            }
+        )
+
+    ilink_client.get_config = counting_get_config  # type: ignore[assignment]
+    ilink_client.send_typing = flaky_send_typing  # type: ignore[assignment]
+
+    processed1 = await service.manager.poll_credential_once(credential["credential_id"])
+    assert processed1 == 1
+    await asyncio.sleep(0)
+    assert credential["credential_id"] not in service.manager._typing_tickets
+
+    processed2 = await service.manager.poll_credential_once(credential["credential_id"])
+    assert processed2 == 1
+    await asyncio.sleep(0)
+    assert service.manager._typing_tickets[credential["credential_id"]] == "fake-ticket"
+    assert get_config_calls == 2
+    assert len(ilink_client.typing_calls) == 1
+
+    await service.stop()
 
 
 @pytest.mark.asyncio

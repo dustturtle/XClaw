@@ -562,6 +562,7 @@ class MultiTenantBotManager:
         self.poll_timeout_ms = poll_timeout_ms
         self.max_reply_chars = max_reply_chars
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._typing_tickets: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -574,10 +575,37 @@ class MultiTenantBotManager:
         async with self._lock:
             tasks = list(self._tasks.values())
             self._tasks = {}
+            self._typing_tickets = {}
         for task in tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    async def _send_typing_indicator(
+        self,
+        credential: ChannelCredentialRecord,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None:
+        try:
+            await self.ilink_client.send_typing(
+                credential.base_url,
+                credential.bot_token,
+                to_user_id,
+                typing_ticket,
+            )
+            logger.info(
+                "send_typing succeeded for credential %s recipient %s",
+                credential.credential_id,
+                to_user_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "send_typing failed for credential %s, invalidating cached typing_ticket",
+                credential.credential_id,
+            )
+            if self._typing_tickets.get(credential.credential_id) == typing_ticket:
+                self._typing_tickets.pop(credential.credential_id, None)
 
     async def ensure_credential_running(self, credential_id: str) -> None:
         async with self._lock:
@@ -605,6 +633,23 @@ class MultiTenantBotManager:
         runtime = MemberRuntimeStateRecord.model_validate(
             await self.db.get_runtime_state(member.member_id, member.tenant_id)
         )
+        # Lazily fetch typing_ticket if not cached
+        if credential.credential_id not in self._typing_tickets:
+            try:
+                cfg = await self.ilink_client.get_config(
+                    credential.base_url, credential.bot_token,
+                )
+                if cfg.typing_ticket:
+                    self._typing_tickets[credential.credential_id] = cfg.typing_ticket
+                    logger.info(
+                        "Fetched typing_ticket for credential %s",
+                        credential.credential_id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to fetch typing_ticket for credential %s",
+                    credential.credential_id,
+                )
         response = await self.ilink_client.get_updates(
             credential.base_url,
             credential.bot_token,
@@ -697,6 +742,23 @@ class MultiTenantBotManager:
                 last_error="Missing context_token for inbound message.",
             )
             return False
+
+        # Send typing indicator (fire-and-forget)
+        typing_ticket = self._typing_tickets.get(credential.credential_id, "")
+        if typing_ticket:
+            logger.info(
+                "Scheduling send_typing for credential %s inbound message from %s",
+                credential.credential_id,
+                message.sender_id,
+            )
+            asyncio.create_task(
+                self._send_typing_indicator(
+                    credential,
+                    message.sender_id,
+                    typing_ticket,
+                ),
+                name=f"xclaw-tenant-send-typing-{credential.credential_id}",
+            )
 
         if not message.is_text:
             await self.ilink_client.send_text_message(

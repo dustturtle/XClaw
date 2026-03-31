@@ -139,12 +139,18 @@ class WechatBotStatusPayload(BaseModel):
     active_sessions: int = 0
 
 
+class IlinkGetConfigResponse(BaseModel):
+    ret: int = 0
+    typing_ticket: str = ""
+
+
 class WechatState(BaseModel):
     get_updates_buf: str = ""
     context_tokens: dict[str, str] = Field(default_factory=dict)
     recent_message_ids: list[str] = Field(default_factory=list)
     last_error: str | None = None
     last_poll_at: str | None = None
+    typing_ticket: str = ""
 
 
 class IlinkTextItem(BaseModel):
@@ -334,6 +340,18 @@ class IlinkClient(Protocol):
         context_token: str,
     ) -> dict[str, Any]: ...
 
+    async def get_config(
+        self, base_url: str, token: str,
+    ) -> IlinkGetConfigResponse: ...
+
+    async def send_typing(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None: ...
+
     async def close(self) -> None: ...
 
 
@@ -460,6 +478,38 @@ class HttpIlinkClient:
                 f"errmsg={payload.get('errmsg', 'unknown')}"
             )
         return dict(payload) if isinstance(payload, dict) else {}
+
+    async def get_config(
+        self, base_url: str, token: str,
+    ) -> IlinkGetConfigResponse:
+        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/getconfig"
+        body = {"base_info": {"channel_version": CHANNEL_VERSION}}
+        payload = await self._post_json(
+            url, body=body, token=token,
+            timeout_seconds=self._request_timeout_seconds,
+        )
+        try:
+            return IlinkGetConfigResponse.model_validate(payload)
+        except Exception as exc:  # pragma: no cover
+            raise IlinkClientError(f"Failed to parse getconfig response: {exc}") from exc
+
+    async def send_typing(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None:
+        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/sendtyping"
+        body = {
+            "to_user_id": to_user_id,
+            "typing_ticket": typing_ticket,
+            "base_info": {"channel_version": CHANNEL_VERSION},
+        }
+        await self._post_json(
+            url, body=body, token=token,
+            timeout_seconds=self._request_timeout_seconds,
+        )
 
     async def _get_json(
         self,
@@ -708,12 +758,47 @@ class WeChatAdapter(ChannelAdapter):
         await self.stop(clear_state=True, clear_account=True)
         self._attempt_store.clear()
 
+    async def _ensure_typing_ticket(self, account: WechatAccount, state: WechatState) -> None:
+        """Fetch typing_ticket via getconfig if not yet cached."""
+        if state.typing_ticket:
+            return
+        try:
+            cfg = await self._ilink_client.get_config(account.base_url, account.bot_token)
+            if cfg.typing_ticket:
+                state.typing_ticket = cfg.typing_ticket
+                self._state_store.save(state)
+                logger.info("Fetched typing_ticket for single-tenant wechat bot")
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch typing_ticket, will retry next poll")
+
+    async def _send_typing_indicator(
+        self,
+        account: WechatAccount,
+        to_user_id: str,
+        typing_ticket: str,
+    ) -> None:
+        try:
+            await self._ilink_client.send_typing(
+                account.base_url,
+                account.bot_token,
+                to_user_id,
+                typing_ticket,
+            )
+            logger.info("send_typing succeeded for single-tenant recipient %s", to_user_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("send_typing failed, invalidating cached typing_ticket")
+            latest_state = self._state_store.load()
+            if latest_state.typing_ticket == typing_ticket:
+                latest_state.typing_ticket = ""
+                self._state_store.save(latest_state)
+
     async def poll_once(self) -> int:
         account = self._account_store.load()
         if account is None:
             return 0
 
         state = self._state_store.load()
+        await self._ensure_typing_ticket(account, state)
         response = await self._ilink_client.get_updates(
             account.base_url,
             account.bot_token,
@@ -810,6 +895,21 @@ class WeChatAdapter(ChannelAdapter):
                 f"Message from {message.sender_id} is missing a usable context_token."
             )
             return False
+
+        # Send typing indicator (fire-and-forget)
+        if state.typing_ticket:
+            logger.info(
+                "Scheduling send_typing for single-tenant inbound message from %s",
+                message.sender_id,
+            )
+            asyncio.create_task(
+                self._send_typing_indicator(
+                    account,
+                    message.sender_id,
+                    state.typing_ticket,
+                ),
+                name="xclaw-wechat-send-typing",
+            )
 
         if not message.is_text:
             try:
@@ -960,6 +1060,7 @@ __all__ = [
     "HANDLER_FAILURE_MESSAGE",
     "HttpIlinkClient",
     "IlinkClientError",
+    "IlinkGetConfigResponse",
     "LoginAttemptNotFoundError",
     "LoginStatusPayload",
     "NormalizedWechatInbound",
