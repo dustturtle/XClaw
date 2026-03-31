@@ -49,6 +49,7 @@ MAX_RECENT_MESSAGE_IDS = 200
 UNSUPPORTED_PRIVATE_MESSAGE = "当前仅支持文本消息，请直接发送文字。"
 HANDLER_FAILURE_MESSAGE = "我刚才处理这条消息时遇到了一点问题，请稍后再试。"
 EMPTY_REPLY_MESSAGE = "我暂时没有生成合适的回复，请换一种说法再试一次。"
+PROCESSING_STATUS_MESSAGE = "对方正在输入..."
 
 
 def utc_now() -> datetime:
@@ -758,47 +759,12 @@ class WeChatAdapter(ChannelAdapter):
         await self.stop(clear_state=True, clear_account=True)
         self._attempt_store.clear()
 
-    async def _ensure_typing_ticket(self, account: WechatAccount, state: WechatState) -> None:
-        """Fetch typing_ticket via getconfig if not yet cached."""
-        if state.typing_ticket:
-            return
-        try:
-            cfg = await self._ilink_client.get_config(account.base_url, account.bot_token)
-            if cfg.typing_ticket:
-                state.typing_ticket = cfg.typing_ticket
-                self._state_store.save(state)
-                logger.info("Fetched typing_ticket for single-tenant wechat bot")
-        except Exception:  # noqa: BLE001
-            logger.warning("Failed to fetch typing_ticket, will retry next poll")
-
-    async def _send_typing_indicator(
-        self,
-        account: WechatAccount,
-        to_user_id: str,
-        typing_ticket: str,
-    ) -> None:
-        try:
-            await self._ilink_client.send_typing(
-                account.base_url,
-                account.bot_token,
-                to_user_id,
-                typing_ticket,
-            )
-            logger.info("send_typing succeeded for single-tenant recipient %s", to_user_id)
-        except Exception:  # noqa: BLE001
-            logger.warning("send_typing failed, invalidating cached typing_ticket")
-            latest_state = self._state_store.load()
-            if latest_state.typing_ticket == typing_ticket:
-                latest_state.typing_ticket = ""
-                self._state_store.save(latest_state)
-
     async def poll_once(self) -> int:
         account = self._account_store.load()
         if account is None:
             return 0
 
         state = self._state_store.load()
-        await self._ensure_typing_ticket(account, state)
         response = await self._ilink_client.get_updates(
             account.base_url,
             account.bot_token,
@@ -896,21 +862,6 @@ class WeChatAdapter(ChannelAdapter):
             )
             return False
 
-        # Send typing indicator (fire-and-forget)
-        if state.typing_ticket:
-            logger.info(
-                "Scheduling send_typing for single-tenant inbound message from %s",
-                message.sender_id,
-            )
-            asyncio.create_task(
-                self._send_typing_indicator(
-                    account,
-                    message.sender_id,
-                    state.typing_ticket,
-                ),
-                name="xclaw-wechat-send-typing",
-            )
-
         if not message.is_text:
             try:
                 await self._deliver_text_with_account(
@@ -930,6 +881,12 @@ class WeChatAdapter(ChannelAdapter):
             return False
 
         try:
+            await self._deliver_text_with_account(
+                account,
+                message.sender_id,
+                PROCESSING_STATUS_MESSAGE,
+                reply_context_token,
+            )
             reply_text = await self._message_handler(message.sender_id, message.text)
         except Exception as exc:  # noqa: BLE001
             state.last_error = str(exc)

@@ -18,6 +18,7 @@ from xclaw.channels.wechat import (
     IlinkWireMessage,
     QRCodeResponse,
     QRStatusResponse,
+    PROCESSING_STATUS_MESSAGE,
     UNSUPPORTED_PRIVATE_MESSAGE,
     WeChatAdapter,
     WechatAccount,
@@ -194,8 +195,9 @@ async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
     assert processed == 1
     assert client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
     assert client.sent_messages[0]["context_token"] == "ctx-1"
-    assert "**" not in client.sent_messages[0]["text"]
-    assert "[链接]" not in client.sent_messages[0]["text"]
+    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
+    assert "**" not in client.sent_messages[1]["text"]
+    assert "[链接]" not in client.sent_messages[1]["text"]
     assert state.get_updates_buf == "buf-2"
     assert state.context_tokens["alice@im.wechat"] == "ctx-1"
     assert state.last_error is None
@@ -220,7 +222,7 @@ async def test_wechat_poll_once_ignores_duplicate_messages(tmp_path: Path) -> No
     await adapter.poll_once()
     await adapter.poll_once()
 
-    assert len(client.sent_messages) == 1
+    assert len(client.sent_messages) == 2
     await adapter.close()
 
 
@@ -283,7 +285,8 @@ async def test_wechat_poll_once_sends_failure_hint_when_handler_errors(tmp_path:
     processed = await adapter.poll_once()
 
     assert processed == 1
-    assert client.sent_messages[0]["text"] == HANDLER_FAILURE_MESSAGE
+    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
+    assert client.sent_messages[1]["text"] == HANDLER_FAILURE_MESSAGE
     await adapter.close()
 
 
@@ -403,8 +406,7 @@ def test_config_api_includes_wechat_flag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_typing_ticket_fetched_and_sent(tmp_path: Path) -> None:
-    """typing_ticket should be fetched via getconfig and sent before message processing."""
+async def test_status_message_sent_before_processing_reply(tmp_path: Path) -> None:
     updates = [
         IlinkGetUpdatesResponse(
             ret=0,
@@ -417,101 +419,7 @@ async def test_typing_ticket_fetched_and_sent(tmp_path: Path) -> None:
 
     processed = await adapter.poll_once()
     assert processed == 1
-    # Let fire-and-forget typing task complete
-    await asyncio.sleep(0)
-
-    # typing_ticket should be cached in state
-    state = adapter._state_store.load()
-    assert state.typing_ticket == "fake-ticket"
-
-    # send_typing should have been called
-    assert len(client.typing_calls) == 1
-    assert client.typing_calls[0]["to_user_id"] == "alice@im.wechat"
-    assert client.typing_calls[0]["typing_ticket"] == "fake-ticket"
-
-
-@pytest.mark.asyncio
-async def test_typing_not_sent_when_getconfig_fails(tmp_path: Path) -> None:
-    """If getconfig fails, polling should still work — typing is non-critical."""
-    updates = [
-        IlinkGetUpdatesResponse(
-            ret=0,
-            msgs=[_make_text_message("hello")],
-            get_updates_buf="buf-2",
-        ),
-    ]
-    adapter, client = _make_adapter(tmp_path, updates=updates)
-    _save_account(adapter)
-
-    # Make get_config raise
-    async def broken_get_config(base_url, token):
-        raise RuntimeError("network error")
-
-    client.get_config = broken_get_config  # type: ignore[assignment]
-
-    processed = await adapter.poll_once()
-    assert processed == 1
-    assert len(client.typing_calls) == 0
-    assert len(client.sent_messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_typing_failure_invalidates_cached_ticket_and_recovers(tmp_path: Path) -> None:
-    updates = [
-        IlinkGetUpdatesResponse(
-            ret=0,
-            msgs=[_make_text_message("first", message_id="m-1")],
-            get_updates_buf="buf-1",
-        ),
-        IlinkGetUpdatesResponse(
-            ret=0,
-            msgs=[_make_text_message("second", message_id="m-2")],
-            get_updates_buf="buf-2",
-        ),
-    ]
-    adapter, client = _make_adapter(tmp_path, updates=updates)
-    _save_account(adapter)
-
-    original_get_config = client.get_config
-    get_config_calls = 0
-
-    async def counting_get_config(base_url: str, token: str) -> IlinkGetConfigResponse:
-        nonlocal get_config_calls
-        get_config_calls += 1
-        return await original_get_config(base_url, token)
-
-    send_typing_calls = 0
-
-    async def flaky_send_typing(
-        base_url: str,
-        token: str,
-        to_user_id: str,
-        typing_ticket: str,
-    ) -> None:
-        nonlocal send_typing_calls
-        send_typing_calls += 1
-        if send_typing_calls == 1:
-            raise RuntimeError("expired ticket")
-        client.typing_calls.append(
-            {
-                "to_user_id": to_user_id,
-                "typing_ticket": typing_ticket,
-            }
-        )
-
-    client.get_config = counting_get_config  # type: ignore[assignment]
-    client.send_typing = flaky_send_typing  # type: ignore[assignment]
-
-    processed1 = await adapter.poll_once()
-    assert processed1 == 1
-    await asyncio.sleep(0)
-    state_after_failure = adapter._state_store.load()
-    assert state_after_failure.typing_ticket == ""
-
-    processed2 = await adapter.poll_once()
-    assert processed2 == 1
-    await asyncio.sleep(0)
-    state_after_recovery = adapter._state_store.load()
-    assert state_after_recovery.typing_ticket == "fake-ticket"
-    assert get_config_calls == 2
-    assert len(client.typing_calls) == 1
+    assert len(client.sent_messages) == 2
+    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
+    assert client.sent_messages[1]["to_user_id"] == "alice@im.wechat"
+    assert client.sent_messages[1]["context_token"] == "ctx-1"

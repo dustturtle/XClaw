@@ -327,6 +327,10 @@ wechat_invite_session_total_timeout_seconds: 90
 - 当前 iLink 微信请求会继承启动进程所在环境的系统代理配置，例如 `HTTP_PROXY`、`HTTPS_PROXY`
 - 如果本机代理开启但无法正确访问 `https://ilinkai.weixin.qq.com`，可能影响二维码获取、扫码状态轮询、长轮询收消息和消息回复
 - 如果微信链路出现“服务已启动但长时间不回复”或扫码流程异常，建议先检查启动 XClaw 的终端 / IDE / 系统服务环境里是否注入了代理变量
+- iLink 的 `/ilink/bot/getconfig` 在当前这批真实 Bot 凭证上返回 `ret=-2`，没有可用的 `typing_ticket`；我们用 5 个活跃微信凭证做过实测，结果一致
+- 因此，XClaw 当前不再依赖 `/ilink/bot/getconfig` 和 `/ilink/bot/sendtyping` 展示“正在输入”
+- 现行方案改为：服务端收到微信文本消息并拿到可用 `context_token` 后，先主动发送一条状态消息 `对方正在输入...`，再发送正式回复
+- 这意味着用户会先看到一条状态提示文本，然后再看到最终答案；这条状态消息属于产品设计上的显式反馈，不是 iLink 原生输入中状态
 
 常用接口：
 

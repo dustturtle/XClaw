@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from xclaw.channels.wechat import IlinkGetConfigResponse, IlinkGetUpdatesResponse, IlinkWireMessage, QRCodeResponse, QRStatusResponse
+from xclaw.channels.wechat import (
+    IlinkGetConfigResponse,
+    IlinkGetUpdatesResponse,
+    IlinkWireMessage,
+    PROCESSING_STATUS_MESSAGE,
+    QRCodeResponse,
+    QRStatusResponse,
+)
 from xclaw.channels.wechat_multi_tenant import WeChatMultiTenantService, build_member_chat_id
 from xclaw.channels.web import create_web_app
 from xclaw.db import Database
@@ -277,16 +284,19 @@ async def test_multitenant_manager_isolates_member_chat_ids(db: Database) -> Non
     assert handler.await_args_list[1].args[0] == build_member_chat_id(
         tenant["tenant_id"], member2["member_id"]
     )
+    assert ilink_client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
     assert ilink_client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
-    assert ilink_client.sent_messages[1]["to_user_id"] == "bob@im.wechat"
-    assert len(ilink_client.typing_calls) == 2
+    assert ilink_client.sent_messages[1]["to_user_id"] == "alice@im.wechat"
+    assert ilink_client.sent_messages[2]["text"] == PROCESSING_STATUS_MESSAGE
+    assert ilink_client.sent_messages[2]["to_user_id"] == "bob@im.wechat"
+    assert ilink_client.sent_messages[3]["to_user_id"] == "bob@im.wechat"
 
     await service.stop()
     assert ilink_client.closed is True
 
 
 @pytest.mark.asyncio
-async def test_multitenant_typing_failure_invalidates_cached_ticket(db: Database) -> None:
+async def test_multitenant_status_message_sent_before_reply(db: Database) -> None:
     ilink_client = FakeIlinkClient()
     handler = AsyncMock(return_value="ok")
     service = _make_service(db, ilink_client=ilink_client, handler=handler)
@@ -327,62 +337,13 @@ async def test_multitenant_typing_failure_invalidates_cached_ticket(db: Database
                 )
             ],
         ),
-        IlinkGetUpdatesResponse(
-            ret=0,
-            get_updates_buf="buf-2",
-            msgs=[
-                _make_text_message(
-                    "again",
-                    sender_id="alice@im.wechat",
-                    context_token="ctx-a",
-                    message_id="m-2",
-                )
-            ],
-        ),
     ]
 
-    original_get_config = ilink_client.get_config
-    get_config_calls = 0
-
-    async def counting_get_config(base_url: str, token: str) -> IlinkGetConfigResponse:
-        nonlocal get_config_calls
-        get_config_calls += 1
-        return await original_get_config(base_url, token)
-
-    send_typing_calls = 0
-
-    async def flaky_send_typing(
-        base_url: str,
-        token: str,
-        to_user_id: str,
-        typing_ticket: str,
-    ) -> None:
-        nonlocal send_typing_calls
-        send_typing_calls += 1
-        if send_typing_calls == 1:
-            raise RuntimeError("expired ticket")
-        ilink_client.typing_calls.append(
-            {
-                "token": token,
-                "to_user_id": to_user_id,
-                "typing_ticket": typing_ticket,
-            }
-        )
-
-    ilink_client.get_config = counting_get_config  # type: ignore[assignment]
-    ilink_client.send_typing = flaky_send_typing  # type: ignore[assignment]
-
-    processed1 = await service.manager.poll_credential_once(credential["credential_id"])
-    assert processed1 == 1
-    await asyncio.sleep(0)
-    assert credential["credential_id"] not in service.manager._typing_tickets
-
-    processed2 = await service.manager.poll_credential_once(credential["credential_id"])
-    assert processed2 == 1
-    await asyncio.sleep(0)
-    assert service.manager._typing_tickets[credential["credential_id"]] == "fake-ticket"
-    assert get_config_calls == 2
-    assert len(ilink_client.typing_calls) == 1
+    processed = await service.manager.poll_credential_once(credential["credential_id"])
+    assert processed == 1
+    assert len(ilink_client.sent_messages) == 2
+    assert ilink_client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
+    assert ilink_client.sent_messages[1]["text"] == "ok"
 
     await service.stop()
 
