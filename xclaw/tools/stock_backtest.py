@@ -110,26 +110,32 @@ class StockBacktestTool(Tool):
         rsi_overbought = float(params.get("rsi_overbought", 70))
 
         end_date = params.get("end_date") or date.today().strftime("%Y-%m-%d")
-        start_date = params.get("start_date") or (
+        eval_start = params.get("start_date") or (
             date.today() - timedelta(days=365)
         ).strftime("%Y-%m-%d")
 
         if not symbol:
             return ToolResult(content="股票代码不能为空", is_error=True)
 
+        # Determine warmup bars needed for the chosen strategy.
+        indicator_period = slow_period if strategy == "sma_cross" else rsi_period
+        warmup_bars = indicator_period + self._MIN_WARMUP_BARS
+        # Extend start_date backward to guarantee enough warmup data
+        # (~2.0x calendar days per trading day to account for weekends/holidays).
+        warmup_calendar_days = int(warmup_bars * 2.0)
+        fetch_start = (
+            date.fromisoformat(eval_start) - timedelta(days=warmup_calendar_days)
+        ).strftime("%Y-%m-%d")
+
         try:
             loop = asyncio.get_event_loop()
-            closes = await self._fetch_closes(symbol, market, start_date, end_date, loop)
+            closes, dates = await self._fetch_closes(symbol, market, fetch_start, end_date, loop)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"获取历史数据失败: {exc}", is_error=True)
 
-        if len(closes) < max(
-            slow_period + self._MIN_WARMUP_BARS,
-            rsi_period + self._MIN_WARMUP_BARS,
-            20,
-        ):
+        if len(closes) < warmup_bars:
             return ToolResult(
-                content=f"历史数据不足（{len(closes)} 条），请扩大日期范围",
+                content=f"历史数据不足（{len(closes)} 条，至少需要 {warmup_bars} 条），请扩大日期范围",
                 is_error=True,
             )
 
@@ -141,16 +147,31 @@ class StockBacktestTool(Tool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"回测计算失败: {exc}", is_error=True)
 
+        # ── Trim to evaluation window (>= eval_start) ────────────────────────
+        eval_bar = 0
+        for i, d in enumerate(dates):
+            if d >= eval_start:
+                eval_bar = i
+                break
+
+        eval_equity = equity[eval_bar:]
+        eval_closes = closes[eval_bar:]
+        eval_trades = [t for t in trades if t["day"] >= eval_bar]
+        # Re-index trade days relative to eval window for display.
+        for t in eval_trades:
+            t["date"] = dates[t["day"]] if t["day"] < len(dates) else ""
+
         return ToolResult(content=self._format_result(
-            symbol, market, strategy, start_date, end_date,
-            closes, trades, equity,
+            symbol, market, strategy, eval_start, end_date,
+            eval_closes, eval_trades, eval_equity,
         ))
 
     # ── Data fetching ──────────────────────────────────────────────────────────
 
     async def _fetch_closes(
         self, symbol: str, market: str, start_date: str, end_date: str, loop: Any
-    ) -> list[float]:
+    ) -> tuple[list[float], list[str]]:
+        """Return (closes, dates) sorted by date ascending."""
         if market == "CN":
             df = await fetch_cn_history_dataframe(
                 symbol,
@@ -160,7 +181,9 @@ class StockBacktestTool(Tool):
             )
             if df is None or df.empty:
                 raise ValueError(f"No data for {symbol}")
-            return [float(v) for v in df["收盘"].dropna().tolist()]
+            dates = [str(d) for d in df["日期"].tolist()]
+            closes = [float(v) for v in df["收盘"].dropna().tolist()]
+            return closes, dates
         else:
             import yfinance as yf  # type: ignore[import]
             yf_symbol = f"{symbol}.HK" if market == "HK" and not symbol.endswith(".HK") else symbol
@@ -171,7 +194,9 @@ class StockBacktestTool(Tool):
             )
             if df is None or df.empty:
                 raise ValueError(f"No data for {yf_symbol}")
-            return [float(v) for v in df["Close"].tolist()]
+            dates = [str(idx)[:10] for idx in df.index]
+            closes = [float(v) for v in df["Close"].tolist()]
+            return closes, dates
 
     # ── Strategy: SMA crossover ────────────────────────────────────────────────
 
@@ -386,7 +411,8 @@ class StockBacktestTool(Tool):
         for t in shown:
             action_icon = "🟢买入" if t["action"] == "buy" else "🔴卖出"
             rsi_str = f"  RSI={t['rsi']}" if "rsi" in t else ""
-            lines.append(f"  第{t['day']+1}日 {action_icon} @ {t['price']:.2f}{rsi_str}")
+            date_str = t.get("date", f"第{t['day']+1}日")
+            lines.append(f"  {date_str} {action_icon} @ {t['price']:.2f}{rsi_str}")
         if len([t for t in trades if "note" not in t]) > 10:
             lines.append("  ...")
 

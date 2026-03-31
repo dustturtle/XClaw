@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -508,7 +509,7 @@ class TestStockBacktest:
         tool = StockBacktestTool()
         ctx = ToolContext(chat_id=1, channel="test")
         # Mock _fetch_closes to return too few data points
-        tool._fetch_closes = AsyncMock(return_value=[100.0, 101.0, 102.0])
+        tool._fetch_closes = AsyncMock(return_value=([100.0, 101.0, 102.0], ["2024-01-01", "2024-01-02", "2024-01-03"]))
         result = await tool.execute({"symbol": "TEST", "market": "US"}, ctx)
         assert result.is_error
         assert "不足" in result.content
@@ -522,7 +523,8 @@ class TestStockBacktest:
         ctx = ToolContext(chat_id=1, channel="test")
         # Generate enough synthetic data
         closes = [100.0 + 10 * math.sin(i / 5.0) + 0.1 * i for i in range(100)]
-        tool._fetch_closes = AsyncMock(return_value=closes)
+        dates = [(date(2024, 1, 1) + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(100)]
+        tool._fetch_closes = AsyncMock(return_value=(closes, dates))
         result = await tool.execute(
             {"symbol": "TEST", "strategy": "sma_cross", "fast_period": 5, "slow_period": 15},
             ctx,
@@ -540,13 +542,50 @@ class TestStockBacktest:
         tool = StockBacktestTool()
         ctx = ToolContext(chat_id=1, channel="test")
         closes = [100.0 + 10 * math.sin(i / 5.0) + 0.1 * i for i in range(80)]
-        tool._fetch_closes = AsyncMock(return_value=closes)
+        dates = [(date(2024, 1, 1) + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(80)]
+        tool._fetch_closes = AsyncMock(return_value=(closes, dates))
         result = await tool.execute(
             {"symbol": "TEST", "strategy": "rsi", "rsi_period": 14},
             ctx,
         )
         assert not result.is_error
         assert "RSI" in result.content
+
+    @pytest.mark.asyncio
+    async def test_backtest_warmup_eval_separation(self):
+        """Metrics and trades should only cover the eval window, not warmup bars."""
+        from xclaw.tools import ToolContext
+        from xclaw.tools.stock_backtest import StockBacktestTool
+        tool = StockBacktestTool()
+        ctx = ToolContext(chat_id=1, channel="test")
+        # 80 bars total: first 40 = warmup, last 40 = eval window.
+        # Prices: steady rise from 100 to ~180 then flat.
+        closes = [100.0 + i for i in range(80)]
+        base = date(2024, 1, 1)
+        dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(80)]
+        eval_start = dates[40]  # evaluation starts at bar 40
+        tool._fetch_closes = AsyncMock(return_value=(closes, dates))
+        result = await tool.execute(
+            {
+                "symbol": "TEST",
+                "strategy": "sma_cross",
+                "fast_period": 5,
+                "slow_period": 15,
+                "start_date": eval_start,
+                "end_date": dates[-1],
+            },
+            ctx,
+        )
+        assert not result.is_error
+        content = result.content
+        # The date range displayed should start at eval_start, not bar 0.
+        assert eval_start in content
+        # Buy-and-hold should reflect eval window only: (179-140)/140 ≈ 27.86%, NOT full 79%.
+        assert "27.8" in content or "27.9" in content
+        # Trade dates (if any) should be within eval window.
+        for line in content.split("\n"):
+            if "买入" in line or "卖出" in line:
+                assert "2024-01-01" not in line  # bar 0 date should NOT appear
 
 
 # ══════════════════════════════════════════════════════════════════════════════
