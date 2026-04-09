@@ -194,6 +194,26 @@ def _make_image_message(
     )
 
 
+def _make_voice_message(
+    transcript: str,
+    *,
+    sender_id: str = "alice@im.wechat",
+    context_token: str = "ctx-1",
+    create_time_ms: int = 1,
+    message_id: str | int | None = None,
+) -> IlinkWireMessage:
+    payload: dict[str, object] = {
+        "from_user_id": sender_id,
+        "message_type": 1,
+        "context_token": context_token,
+        "create_time_ms": create_time_ms,
+        "item_list": [{"type": 3, "voice_item": {"text": transcript}}],
+    }
+    if message_id is not None:
+        payload["message_id"] = message_id
+    return IlinkWireMessage.model_validate(payload)
+
+
 @pytest.mark.asyncio
 async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
     handler = AsyncMock(return_value="**你好**\n\n[链接](https://example.com)")
@@ -216,8 +236,8 @@ async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
     assert processed == 1
     assert client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
     assert client.sent_messages[0]["context_token"] == "ctx-1"
-    assert "**" not in client.sent_messages[0]["text"]
-    assert "[链接]" not in client.sent_messages[0]["text"]
+    assert "**你好**" in client.sent_messages[0]["text"]
+    assert "[链接](https://example.com)" in client.sent_messages[0]["text"]
     assert client.typing_calls == []
     assert state.get_updates_buf == "buf-2"
     assert state.context_tokens["alice@im.wechat"] == "ctx-1"
@@ -262,6 +282,29 @@ async def test_wechat_poll_once_sends_notice_for_non_text(tmp_path: Path) -> Non
     assert processed == 1
     assert client.sent_messages[0]["text"] == UNSUPPORTED_PRIVATE_MESSAGE
     handler.assert_not_called()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_wechat_poll_once_processes_voice_transcript_as_text(tmp_path: Path) -> None:
+    handler = AsyncMock(return_value="收到你的语音转写")
+    adapter, client = _make_adapter(
+        tmp_path,
+        handler=handler,
+        updates=[
+            IlinkGetUpdatesResponse(
+                ret=0,
+                msgs=[_make_voice_message("帮我看看今天大盘", message_id="voice-1")],
+            )
+        ],
+    )
+    _save_account(adapter)
+
+    processed = await adapter.poll_once()
+
+    assert processed == 1
+    handler.assert_awaited_once_with("alice@im.wechat", "帮我看看今天大盘")
+    assert client.sent_messages[0]["text"] == "收到你的语音转写"
     await adapter.close()
 
 
@@ -390,14 +433,21 @@ async def test_long_reply_refreshes_typing_until_completion(
     await adapter.close()
 
 
-def test_sanitize_reply_text_removes_markdown_and_truncates() -> None:
+def test_sanitize_reply_text_preserves_markdown() -> None:
     reply = sanitize_reply_text(
         "# 标题\n\n```python\nprint('hi')\n```\n[链接](https://example.com)\n**加粗**",
-        max_chars=20,
+        max_chars=200,
     )
 
-    assert "```" not in reply
-    assert "#" not in reply
+    assert "# 标题" in reply
+    assert "```python" in reply
+    assert "[链接](https://example.com)" in reply
+    assert "**加粗**" in reply
+
+
+def test_sanitize_reply_text_truncates_and_handles_empty_markdown() -> None:
+    reply = sanitize_reply_text("A" * 50, max_chars=20)
+
     assert reply.endswith("…")
     assert sanitize_reply_text("```python\n```", max_chars=100) == EMPTY_REPLY_MESSAGE
 

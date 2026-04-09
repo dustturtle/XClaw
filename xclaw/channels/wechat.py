@@ -30,7 +30,7 @@ from urllib.parse import quote
 
 import httpx
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from xclaw.channels import ChannelAdapter
 
@@ -168,12 +168,38 @@ class IlinkTextItem(BaseModel):
     text: str = ""
 
 
+class IlinkVoiceMedia(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    full_url: str = ""
+    encrypt_query_param: str = ""
+    aes_key: str = ""
+    encode_type: int | None = None
+    bits_per_sample: int | None = None
+    sample_rate: int | None = None
+    playtime: int | None = None
+
+
+class IlinkVoiceItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    encrypt_query_param: str = ""
+    aes_key: str = ""
+    text: str = ""
+    media: IlinkVoiceMedia | None = None
+
+
 class IlinkMessageItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     type: int | None = None
     text_item: IlinkTextItem | None = None
+    voice_item: IlinkVoiceItem | None = None
 
 
 class IlinkWireMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     from_user_id: str = ""
     to_user_id: str = ""
     client_id: str = ""
@@ -626,24 +652,22 @@ def normalize_polled_message(message: IlinkWireMessage) -> NormalizedWechatInbou
 
 def sanitize_reply_text(text: str, *, max_chars: int) -> str:
     cleaned = text.strip()
-    cleaned = re.sub(r"```(?:[\s\S]*?)```", _strip_code_block, cleaned)
-    cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
-    cleaned = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", cleaned)
-    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"^\s*>\s?", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"[*_~]+", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = cleaned.strip()
+    if _is_effectively_empty_markdown(cleaned):
+        return EMPTY_REPLY_MESSAGE
     if len(cleaned) > max_chars:
         cleaned = cleaned[: max_chars - 1].rstrip() + "…"
     return cleaned or EMPTY_REPLY_MESSAGE
 
 
-def _strip_code_block(match: re.Match[str]) -> str:
-    block = match.group(0)
-    block = re.sub(r"^```[^\n]*\n?", "", block)
-    block = re.sub(r"\n?```$", "", block)
-    return block.strip()
+def _is_effectively_empty_markdown(text: str) -> bool:
+    probe = text.strip()
+    if not probe:
+        return True
+    probe = re.sub(r"^```[^\n]*\n?", "", probe)
+    probe = re.sub(r"\n?```$", "", probe)
+    return not probe.strip()
 
 
 def _extract_text_and_kind(message: IlinkWireMessage) -> tuple[str, bool]:
@@ -653,6 +677,10 @@ def _extract_text_and_kind(message: IlinkWireMessage) -> tuple[str, bool]:
     for item in message.item_list:
         if item.type == MSG_ITEM_TEXT and item.text_item and item.text_item.text.strip():
             return item.text_item.text.strip(), True
+        if item.type == MSG_ITEM_VOICE and item.voice_item:
+            voice_text = item.voice_item.text.strip()
+            if voice_text:
+                return voice_text, True
         if item.type == MSG_ITEM_IMAGE:
             return "[图片消息]", False
         if item.type == MSG_ITEM_VOICE:
