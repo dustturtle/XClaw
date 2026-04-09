@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+import xclaw.channels.wechat as wechat_module
 from xclaw.channels.wechat import (
     EMPTY_REPLY_MESSAGE,
     HANDLER_FAILURE_MESSAGE,
@@ -18,7 +19,6 @@ from xclaw.channels.wechat import (
     IlinkWireMessage,
     QRCodeResponse,
     QRStatusResponse,
-    PROCESSING_STATUS_MESSAGE,
     UNSUPPORTED_PRIVATE_MESSAGE,
     WeChatAdapter,
     WechatAccount,
@@ -42,6 +42,7 @@ class FakeIlinkClient:
         self.qr_statuses = qr_statuses or []
         self.updates = updates or []
         self.sent_messages: list[dict[str, str]] = []
+        self.config_calls: list[dict[str, str]] = []
         self.typing_calls: list[dict[str, str]] = []
         self.closed = False
 
@@ -83,21 +84,41 @@ class FakeIlinkClient:
         return {"ret": 0}
 
     async def get_config(
-        self, base_url: str, token: str,
+        self,
+        base_url: str,
+        token: str,
+        *,
+        to_user_id: str,
+        ilink_user_id: str,
+        context_token: str,
     ) -> IlinkGetConfigResponse:
+        self.config_calls.append(
+            {
+                "to_user_id": to_user_id,
+                "ilink_user_id": ilink_user_id,
+                "context_token": context_token,
+            }
+        )
         return IlinkGetConfigResponse(ret=0, typing_ticket="fake-ticket")
 
     async def send_typing(
         self,
         base_url: str,
         token: str,
+        *,
         to_user_id: str,
+        ilink_user_id: str,
         typing_ticket: str,
+        context_token: str | None = None,
+        status: int | None = None,
     ) -> None:
         self.typing_calls.append(
             {
                 "to_user_id": to_user_id,
+                "ilink_user_id": ilink_user_id,
                 "typing_ticket": typing_ticket,
+                "context_token": context_token or "",
+                "status": "" if status is None else str(status),
             }
         )
 
@@ -195,9 +216,9 @@ async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
     assert processed == 1
     assert client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
     assert client.sent_messages[0]["context_token"] == "ctx-1"
-    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
-    assert "**" not in client.sent_messages[1]["text"]
-    assert "[链接]" not in client.sent_messages[1]["text"]
+    assert "**" not in client.sent_messages[0]["text"]
+    assert "[链接]" not in client.sent_messages[0]["text"]
+    assert client.typing_calls == []
     assert state.get_updates_buf == "buf-2"
     assert state.context_tokens["alice@im.wechat"] == "ctx-1"
     assert state.last_error is None
@@ -222,7 +243,7 @@ async def test_wechat_poll_once_ignores_duplicate_messages(tmp_path: Path) -> No
     await adapter.poll_once()
     await adapter.poll_once()
 
-    assert len(client.sent_messages) == 2
+    assert len(client.sent_messages) == 1
     await adapter.close()
 
 
@@ -285,8 +306,87 @@ async def test_wechat_poll_once_sends_failure_hint_when_handler_errors(tmp_path:
     processed = await adapter.poll_once()
 
     assert processed == 1
-    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
-    assert client.sent_messages[1]["text"] == HANDLER_FAILURE_MESSAGE
+    assert client.sent_messages[0]["text"] == HANDLER_FAILURE_MESSAGE
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_send_keeps_typing_until_reply_sent(tmp_path: Path) -> None:
+    handler = AsyncMock(return_value="ok")
+    adapter, client = _make_adapter(
+        tmp_path,
+        handler=handler,
+        updates=[
+            IlinkGetUpdatesResponse(
+                ret=0,
+                msgs=[_make_text_message("你好", message_id="m-slow-send")],
+            )
+        ],
+    )
+    _save_account(adapter)
+
+    original_send = client.send_text_message
+
+    async def delayed_send(
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> dict[str, int]:
+        await asyncio.sleep(0.6)
+        return await original_send(base_url, token, to_user_id, text, context_token)
+
+    client.send_text_message = delayed_send  # type: ignore[method-assign]
+
+    processed = await adapter.poll_once()
+
+    assert processed == 1
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == "ok"
+    assert len(client.config_calls) == 1
+    assert len(client.typing_calls) == 2
+    assert client.typing_calls[0]["status"] == ""
+    assert client.typing_calls[1]["status"] == "2"
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_long_reply_refreshes_typing_until_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wechat_module, "TYPING_TRIGGER_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(wechat_module, "TYPING_REFRESH_INTERVAL_SECONDS", 0.05)
+
+    async def slow_handler(_chat_id: str, _text: str) -> str:
+        await asyncio.sleep(0.18)
+        return "ok"
+
+    adapter, client = _make_adapter(
+        tmp_path,
+        handler=slow_handler,
+        updates=[
+            IlinkGetUpdatesResponse(
+                ret=0,
+                msgs=[_make_text_message("你好", message_id="m-refresh")],
+            )
+        ],
+    )
+    _save_account(adapter)
+
+    processed = await adapter.poll_once()
+
+    assert processed == 1
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == "ok"
+    assert len(client.config_calls) == 1
+    assert len(client.typing_calls) >= 3
+    assert client.typing_calls[0]["status"] == ""
+    assert client.typing_calls[-1]["status"] == "2"
+    assert any(call["status"] == "" for call in client.typing_calls[1:-1])
+
     await adapter.close()
 
 
@@ -406,7 +506,44 @@ def test_config_api_includes_wechat_flag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_message_sent_before_processing_reply(tmp_path: Path) -> None:
+async def test_slow_reply_fetches_typing_and_clears(tmp_path: Path) -> None:
+    updates = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            msgs=[_make_text_message("hi")],
+            get_updates_buf="buf-1",
+        ),
+    ]
+    async def slow_handler(chat_id: str, text: str) -> str:
+        await asyncio.sleep(0.6)
+        return "done"
+
+    adapter, client = _make_adapter(tmp_path, updates=updates, handler=slow_handler)
+    _save_account(adapter)
+
+    processed = await adapter.poll_once()
+    assert processed == 1
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == "done"
+    assert client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
+    assert client.sent_messages[0]["context_token"] == "ctx-1"
+    assert client.config_calls == [
+        {
+            "to_user_id": "alice@im.wechat",
+            "ilink_user_id": "alice@im.wechat",
+            "context_token": "ctx-1",
+        }
+    ]
+    assert len(client.typing_calls) == 2
+    assert client.typing_calls[0]["to_user_id"] == "alice@im.wechat"
+    assert client.typing_calls[0]["context_token"] == "ctx-1"
+    assert client.typing_calls[0]["status"] == ""
+    assert client.typing_calls[1]["status"] == "2"
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_fast_reply_skips_typing(tmp_path: Path) -> None:
     updates = [
         IlinkGetUpdatesResponse(
             ret=0,
@@ -419,7 +556,63 @@ async def test_status_message_sent_before_processing_reply(tmp_path: Path) -> No
 
     processed = await adapter.poll_once()
     assert processed == 1
-    assert len(client.sent_messages) == 2
-    assert client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
-    assert client.sent_messages[1]["to_user_id"] == "alice@im.wechat"
-    assert client.sent_messages[1]["context_token"] == "ctx-1"
+    assert len(client.sent_messages) == 1
+    assert client.config_calls == []
+    assert client.typing_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_typing_getconfig_failure_does_not_block_reply(tmp_path: Path) -> None:
+    updates = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            msgs=[_make_text_message("hi")],
+            get_updates_buf="buf-1",
+        ),
+    ]
+
+    async def slow_handler(chat_id: str, text: str) -> str:
+        await asyncio.sleep(0.6)
+        return "done"
+
+    adapter, client = _make_adapter(tmp_path, updates=updates, handler=slow_handler)
+    _save_account(adapter)
+
+    async def broken_get_config(*args, **kwargs):
+        raise RuntimeError("network error")
+
+    client.get_config = broken_get_config  # type: ignore[assignment]
+
+    processed = await adapter.poll_once()
+    assert processed == 1
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == "done"
+    assert client.typing_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_failure_clears_typing_after_fallback(tmp_path: Path) -> None:
+    updates = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            msgs=[_make_text_message("hi")],
+            get_updates_buf="buf-1",
+        ),
+    ]
+
+    async def slow_broken_handler(chat_id: str, text: str) -> str:
+        await asyncio.sleep(0.6)
+        raise RuntimeError("boom")
+
+    adapter, client = _make_adapter(tmp_path, updates=updates, handler=slow_broken_handler)
+    _save_account(adapter)
+
+    processed = await adapter.poll_once()
+    assert processed == 1
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == HANDLER_FAILURE_MESSAGE
+    assert len(client.typing_calls) == 2
+    assert client.typing_calls[1]["status"] == "2"
+    await adapter.close()

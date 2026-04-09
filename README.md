@@ -327,10 +327,11 @@ wechat_invite_session_total_timeout_seconds: 90
 - 当前 iLink 微信请求会继承启动进程所在环境的系统代理配置，例如 `HTTP_PROXY`、`HTTPS_PROXY`
 - 如果本机代理开启但无法正确访问 `https://ilinkai.weixin.qq.com`，可能影响二维码获取、扫码状态轮询、长轮询收消息和消息回复
 - 如果微信链路出现“服务已启动但长时间不回复”或扫码流程异常，建议先检查启动 XClaw 的终端 / IDE / 系统服务环境里是否注入了代理变量
-- iLink 的 `/ilink/bot/getconfig` 在当前这批真实 Bot 凭证上返回 `ret=-2`，没有可用的 `typing_ticket`；我们用 5 个活跃微信凭证做过实测，结果一致
-- 因此，XClaw 当前不再依赖 `/ilink/bot/getconfig` 和 `/ilink/bot/sendtyping` 展示“正在输入”
-- 现行方案改为：服务端收到微信文本消息并拿到可用 `context_token` 后，先主动发送一条状态消息 `对方正在输入...`，再发送正式回复
-- 这意味着用户会先看到一条状态提示文本，然后再看到最终答案；这条状态消息属于产品设计上的显式反馈，不是 iLink 原生输入中状态
+- 微信“输入中”会在文本私聊、且当前入站消息自带 `message.context_token` 时尝试启用
+- 当前实现采用 0.5 秒延迟触发：如果消息处理很快，就不会展示“输入中”；只有处理时间超过 0.5 秒，才会调用 `/ilink/bot/getconfig` 与 `/ilink/bot/sendtyping`
+- 对于长任务，XClaw 会按固定间隔续发 `/ilink/bot/sendtyping`，尽量避免“输入中”先消失、正式回复又晚一点才到的空窗
+- 正式回复发出后，XClaw 会再调用一次 `/ilink/bot/sendtyping(status=2)` 清理“输入中”状态
+- `getconfig` / `sendtyping` 的失败不会中断主回复链路；即使 typing 展示失败，最终文本回复仍会正常发送
 
 常用接口：
 

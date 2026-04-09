@@ -16,7 +16,9 @@ from pydantic import BaseModel
 
 from xclaw.channels.wechat import (
     HANDLER_FAILURE_MESSAGE,
-    PROCESSING_STATUS_MESSAGE,
+    TYPING_REFRESH_INTERVAL_SECONDS,
+    TYPING_TRIGGER_DELAY_SECONDS,
+    TypingIndicatorContext,
     UNSUPPORTED_PRIVATE_MESSAGE,
     HttpIlinkClient,
     IlinkClient,
@@ -580,6 +582,125 @@ class MultiTenantBotManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    async def _delayed_typing_indicator(
+        self,
+        credential: ChannelCredentialRecord,
+        message: Any,
+        context: TypingIndicatorContext,
+    ) -> None:
+        context.phase = "scheduled"
+        await asyncio.sleep(TYPING_TRIGGER_DELAY_SECONDS)
+        if context.stop_requested.is_set():
+            context.phase = "skipped"
+            return
+
+        context.phase = "sending"
+        try:
+            config = await self.ilink_client.get_config(
+                credential.base_url,
+                credential.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                context_token=message.context_token,
+            )
+            typing_ticket = (config.typing_ticket or "").strip()
+            if config.ret != 0 or not typing_ticket:
+                logger.debug(
+                    "wechat typing get_config unavailable for credential %s sender %s: ret=%s",
+                    credential.credential_id,
+                    message.sender_id,
+                    config.ret,
+                )
+                context.phase = "skipped"
+                return
+
+            context.typing_ticket = typing_ticket
+            if context.stop_requested.is_set():
+                context.phase = "done"
+                return
+
+            await self.ilink_client.send_typing(
+                credential.base_url,
+                credential.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                typing_ticket=typing_ticket,
+                context_token=message.context_token,
+            )
+            context.phase = "active"
+            while not context.stop_requested.is_set():
+                try:
+                    await asyncio.wait_for(
+                        context.stop_requested.wait(),
+                        timeout=TYPING_REFRESH_INTERVAL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if context.stop_requested.is_set():
+                        break
+                    await self.ilink_client.send_typing(
+                        credential.base_url,
+                        credential.bot_token,
+                        to_user_id=message.sender_id,
+                        ilink_user_id=message.sender_id,
+                        typing_ticket=typing_ticket,
+                        context_token=message.context_token,
+                    )
+                else:
+                    break
+            context.phase = "done"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "wechat typing show failed for credential %s sender %s: %s",
+                credential.credential_id,
+                message.sender_id,
+                exc,
+            )
+            context.phase = "done"
+
+    async def _finish_typing_indicator(
+        self,
+        typing_task: asyncio.Task[None] | None,
+        context: TypingIndicatorContext | None,
+    ) -> None:
+        if typing_task is None or context is None:
+            return
+        context.stop_requested.set()
+        if typing_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing_task
+            return
+        if context.phase in {"idle", "scheduled"}:
+            typing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typing_task
+
+    async def _clear_typing_indicator(
+        self,
+        credential: ChannelCredentialRecord,
+        message: Any,
+        context: TypingIndicatorContext | None,
+    ) -> None:
+        if context is None or not context.typing_ticket:
+            return
+        try:
+            await self.ilink_client.send_typing(
+                credential.base_url,
+                credential.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                typing_ticket=context.typing_ticket,
+                status=2,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "wechat typing clear failed for credential %s sender %s: %s",
+                credential.credential_id,
+                message.sender_id,
+                exc,
+            )
+
     async def ensure_credential_running(self, credential_id: str) -> None:
         async with self._lock:
             self._ensure_task_locked(credential_id)
@@ -709,14 +830,16 @@ class MultiTenantBotManager:
             )
             return True
 
-        try:
-            await self.ilink_client.send_text_message(
-                credential.base_url,
-                credential.bot_token,
-                message.sender_id,
-                PROCESSING_STATUS_MESSAGE,
-                reply_context,
+        typing_context: TypingIndicatorContext | None = None
+        typing_task: asyncio.Task[None] | None = None
+        if message.context_token:
+            typing_context = TypingIndicatorContext()
+            typing_task = asyncio.create_task(
+                self._delayed_typing_indicator(credential, message, typing_context),
+                name=f"xclaw-tenant-typing-{credential.credential_id}-{message.message_id}",
             )
+
+        try:
             chat_id = build_member_chat_id(member.tenant_id, member.member_id)
             reply = await self.message_handler(chat_id, message.text)
             reply = sanitize_reply_text(reply, max_chars=self.max_reply_chars)
@@ -726,22 +849,48 @@ class MultiTenantBotManager:
                 tenant_id=member.tenant_id,
                 last_error=str(exc),
             )
+            try:
+                await self.ilink_client.send_text_message(
+                    credential.base_url,
+                    credential.bot_token,
+                    message.sender_id,
+                    HANDLER_FAILURE_MESSAGE,
+                    reply_context,
+                )
+            except Exception as send_exc:  # noqa: BLE001
+                await self._finish_typing_indicator(typing_task, typing_context)
+                await self._clear_typing_indicator(credential, message, typing_context)
+                await self.db.update_runtime_state(
+                    member.member_id,
+                    tenant_id=member.tenant_id,
+                    last_error=f"{exc}; send failure: {send_exc}",
+                )
+                return False
+
+            await self._finish_typing_indicator(typing_task, typing_context)
+            await self._clear_typing_indicator(credential, message, typing_context)
+            return True
+
+        try:
             await self.ilink_client.send_text_message(
                 credential.base_url,
                 credential.bot_token,
                 message.sender_id,
-                HANDLER_FAILURE_MESSAGE,
+                reply,
                 reply_context,
             )
-            return True
+        except Exception as exc:  # noqa: BLE001
+            await self._finish_typing_indicator(typing_task, typing_context)
+            await self._clear_typing_indicator(credential, message, typing_context)
+            await self.db.update_runtime_state(
+                member.member_id,
+                tenant_id=member.tenant_id,
+                last_error=str(exc),
+            )
+            return False
 
-        await self.ilink_client.send_text_message(
-            credential.base_url,
-            credential.bot_token,
-            message.sender_id,
-            reply,
-            reply_context,
-        )
+        await self._finish_typing_indicator(typing_task, typing_context)
+        await self._clear_typing_indicator(credential, message, typing_context)
         await self.db.update_runtime_state(
             member.member_id,
             tenant_id=member.tenant_id,

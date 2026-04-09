@@ -21,6 +21,7 @@ import secrets
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -46,10 +47,12 @@ MSG_ITEM_VIDEO = 5
 
 BACKOFF_DELAYS_SECONDS = (1, 3, 10)
 MAX_RECENT_MESSAGE_IDS = 200
+TYPING_TRIGGER_DELAY_SECONDS = 0.5
+TYPING_REFRESH_INTERVAL_SECONDS = 3.0
+TYPING_TIMEOUT_SECONDS = 5.0
 UNSUPPORTED_PRIVATE_MESSAGE = "当前仅支持文本消息，请直接发送文字。"
 HANDLER_FAILURE_MESSAGE = "我刚才处理这条消息时遇到了一点问题，请稍后再试。"
 EMPTY_REPLY_MESSAGE = "我暂时没有生成合适的回复，请换一种说法再试一次。"
-PROCESSING_STATUS_MESSAGE = "对方正在输入..."
 
 
 def utc_now() -> datetime:
@@ -152,6 +155,13 @@ class WechatState(BaseModel):
     last_error: str | None = None
     last_poll_at: str | None = None
     typing_ticket: str = ""
+
+
+@dataclass(slots=True)
+class TypingIndicatorContext:
+    stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    phase: str = "idle"
+    typing_ticket: str | None = None
 
 
 class IlinkTextItem(BaseModel):
@@ -342,15 +352,25 @@ class IlinkClient(Protocol):
     ) -> dict[str, Any]: ...
 
     async def get_config(
-        self, base_url: str, token: str,
+        self,
+        base_url: str,
+        token: str,
+        *,
+        to_user_id: str,
+        ilink_user_id: str,
+        context_token: str,
     ) -> IlinkGetConfigResponse: ...
 
     async def send_typing(
         self,
         base_url: str,
         token: str,
+        *,
         to_user_id: str,
+        ilink_user_id: str,
         typing_ticket: str,
+        context_token: str | None = None,
+        status: int | None = None,
     ) -> None: ...
 
     async def close(self) -> None: ...
@@ -376,7 +396,7 @@ class HttpIlinkClient:
         await self._client.aclose()
 
     async def fetch_qrcode(self, base_url: str) -> QRCodeResponse:
-        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/get_bot_qrcode?bot_type={BOT_TYPE}"
+        url = f"{_resolve_ilink_api_root(base_url)}bot/get_bot_qrcode?bot_type={BOT_TYPE}"
         payload = await self._get_json(url, timeout_seconds=self._request_timeout_seconds)
         try:
             return QRCodeResponse.model_validate(payload)
@@ -385,7 +405,7 @@ class HttpIlinkClient:
 
     async def poll_qr_status(self, base_url: str, qrcode: str) -> QRStatusResponse:
         url = (
-            f"{_ensure_trailing_slash(base_url)}ilink/bot/get_qrcode_status"
+            f"{_resolve_ilink_api_root(base_url)}bot/get_qrcode_status"
             f"?qrcode={quote(qrcode, safe='')}"
         )
         try:
@@ -409,7 +429,7 @@ class HttpIlinkClient:
         *,
         timeout_ms: int,
     ) -> IlinkGetUpdatesResponse:
-        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/getupdates"
+        url = f"{_resolve_ilink_api_root(base_url)}bot/getupdates"
         body = {
             "get_updates_buf": get_updates_buf,
             "base_info": {"channel_version": CHANNEL_VERSION},
@@ -448,7 +468,7 @@ class HttpIlinkClient:
         text: str,
         context_token: str,
     ) -> dict[str, Any]:
-        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/sendmessage"
+        url = f"{_resolve_ilink_api_root(base_url)}bot/sendmessage"
         body = {
             "msg": {
                 "from_user_id": "",
@@ -481,13 +501,25 @@ class HttpIlinkClient:
         return dict(payload) if isinstance(payload, dict) else {}
 
     async def get_config(
-        self, base_url: str, token: str,
+        self,
+        base_url: str,
+        token: str,
+        *,
+        to_user_id: str,
+        ilink_user_id: str,
+        context_token: str,
     ) -> IlinkGetConfigResponse:
-        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/getconfig"
-        body = {"base_info": {"channel_version": CHANNEL_VERSION}}
+        url = f"{_resolve_ilink_api_root(base_url)}bot/getconfig"
+        body = _build_typing_config_body(
+            to_user_id=to_user_id,
+            ilink_user_id=ilink_user_id,
+            context_token=context_token,
+        )
         payload = await self._post_json(
-            url, body=body, token=token,
-            timeout_seconds=self._request_timeout_seconds,
+            url,
+            body=body,
+            token=token,
+            timeout_seconds=TYPING_TIMEOUT_SECONDS,
         )
         try:
             return IlinkGetConfigResponse.model_validate(payload)
@@ -498,19 +530,33 @@ class HttpIlinkClient:
         self,
         base_url: str,
         token: str,
+        *,
         to_user_id: str,
+        ilink_user_id: str,
         typing_ticket: str,
+        context_token: str | None = None,
+        status: int | None = None,
     ) -> None:
-        url = f"{_ensure_trailing_slash(base_url)}ilink/bot/sendtyping"
-        body = {
-            "to_user_id": to_user_id,
-            "typing_ticket": typing_ticket,
-            "base_info": {"channel_version": CHANNEL_VERSION},
-        }
-        await self._post_json(
-            url, body=body, token=token,
-            timeout_seconds=self._request_timeout_seconds,
+        url = f"{_resolve_ilink_api_root(base_url)}bot/sendtyping"
+        body = _build_send_typing_body(
+            to_user_id=to_user_id,
+            ilink_user_id=ilink_user_id,
+            typing_ticket=typing_ticket,
+            context_token=context_token,
+            status=status,
         )
+        payload = await self._post_json(
+            url,
+            body=body,
+            token=token,
+            timeout_seconds=TYPING_TIMEOUT_SECONDS,
+        )
+        if isinstance(payload, dict) and payload.get("ret") not in (None, 0):
+            raise IlinkClientError(
+                "sendtyping failed: "
+                f"errcode={payload.get('errcode', payload.get('ret'))} "
+                f"errmsg={payload.get('errmsg', 'unknown')}"
+            )
 
     async def _get_json(
         self,
@@ -648,8 +694,46 @@ def _generate_client_id() -> str:
     return f"xclaw:{int(time.time() * 1000)}-{secrets.token_hex(4)}"
 
 
-def _ensure_trailing_slash(base_url: str) -> str:
-    return base_url if base_url.endswith("/") else f"{base_url}/"
+def _resolve_ilink_api_root(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/ilink"):
+        return f"{normalized}/"
+    return f"{normalized}/ilink/"
+
+
+def _build_typing_config_body(
+    *,
+    to_user_id: str,
+    ilink_user_id: str,
+    context_token: str,
+) -> dict[str, Any]:
+    return {
+        "to_user_id": to_user_id,
+        "ilink_user_id": ilink_user_id,
+        "context_token": context_token,
+        "base_info": {"channel_version": CHANNEL_VERSION},
+    }
+
+
+def _build_send_typing_body(
+    *,
+    to_user_id: str,
+    ilink_user_id: str,
+    typing_ticket: str,
+    context_token: str | None = None,
+    status: int | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "to_user_id": to_user_id,
+        "ilink_user_id": ilink_user_id,
+        "typing_ticket": typing_ticket,
+        "base_info": {"channel_version": CHANNEL_VERSION},
+    }
+    if context_token:
+        body["context_token"] = context_token
+    if status is not None:
+        body["status"] = status
+    return body
 
 
 class WeChatAdapter(ChannelAdapter):
@@ -826,6 +910,114 @@ class WeChatAdapter(ChannelAdapter):
         if task is not None or clear_state or clear_account:
             logger.info("WeChat adapter stopped")
 
+    async def _delayed_typing_indicator(
+        self,
+        account: WechatAccount,
+        message: NormalizedWechatInbound,
+        context: TypingIndicatorContext,
+    ) -> None:
+        context.phase = "scheduled"
+        await asyncio.sleep(TYPING_TRIGGER_DELAY_SECONDS)
+        if context.stop_requested.is_set():
+            context.phase = "skipped"
+            return
+
+        context.phase = "sending"
+        try:
+            config = await self._ilink_client.get_config(
+                account.base_url,
+                account.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                context_token=message.context_token,
+            )
+            typing_ticket = (config.typing_ticket or "").strip()
+            if config.ret != 0 or not typing_ticket:
+                logger.debug(
+                    "wechat typing get_config unavailable for %s: ret=%s",
+                    message.sender_id,
+                    config.ret,
+                )
+                context.phase = "skipped"
+                return
+
+            context.typing_ticket = typing_ticket
+            if context.stop_requested.is_set():
+                context.phase = "done"
+                return
+
+            await self._ilink_client.send_typing(
+                account.base_url,
+                account.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                typing_ticket=typing_ticket,
+                context_token=message.context_token,
+            )
+            context.phase = "active"
+            while not context.stop_requested.is_set():
+                try:
+                    await asyncio.wait_for(
+                        context.stop_requested.wait(),
+                        timeout=TYPING_REFRESH_INTERVAL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if context.stop_requested.is_set():
+                        break
+                    await self._ilink_client.send_typing(
+                        account.base_url,
+                        account.bot_token,
+                        to_user_id=message.sender_id,
+                        ilink_user_id=message.sender_id,
+                        typing_ticket=typing_ticket,
+                        context_token=message.context_token,
+                    )
+                else:
+                    break
+            context.phase = "done"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("wechat typing show failed for %s: %s", message.sender_id, exc)
+            context.phase = "done"
+
+    async def _finish_typing_indicator(
+        self,
+        typing_task: asyncio.Task[None] | None,
+        context: TypingIndicatorContext | None,
+    ) -> None:
+        if typing_task is None or context is None:
+            return
+        context.stop_requested.set()
+        if typing_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing_task
+            return
+        if context.phase in {"idle", "scheduled"}:
+            typing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typing_task
+
+    async def _clear_typing_indicator(
+        self,
+        account: WechatAccount,
+        message: NormalizedWechatInbound,
+        context: TypingIndicatorContext | None,
+    ) -> None:
+        if context is None or not context.typing_ticket:
+            return
+        try:
+            await self._ilink_client.send_typing(
+                account.base_url,
+                account.bot_token,
+                to_user_id=message.sender_id,
+                ilink_user_id=message.sender_id,
+                typing_ticket=context.typing_ticket,
+                status=2,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("wechat typing clear failed for %s: %s", message.sender_id, exc)
+
     async def _run_forever(self) -> None:
         backoff_index = 0
         while True:
@@ -880,13 +1072,16 @@ class WeChatAdapter(ChannelAdapter):
             state.last_error = "WeChat adapter message handler is not configured."
             return False
 
-        try:
-            await self._deliver_text_with_account(
-                account,
-                message.sender_id,
-                PROCESSING_STATUS_MESSAGE,
-                reply_context_token,
+        typing_context: TypingIndicatorContext | None = None
+        typing_task: asyncio.Task[None] | None = None
+        if message.context_token:
+            typing_context = TypingIndicatorContext()
+            typing_task = asyncio.create_task(
+                self._delayed_typing_indicator(account, message, typing_context),
+                name=f"xclaw-wechat-typing-{message.message_id}",
             )
+
+        try:
             reply_text = await self._message_handler(message.sender_id, message.text)
         except Exception as exc:  # noqa: BLE001
             state.last_error = str(exc)
@@ -897,8 +1092,12 @@ class WeChatAdapter(ChannelAdapter):
                     HANDLER_FAILURE_MESSAGE,
                     reply_context_token,
                 )
+                await self._finish_typing_indicator(typing_task, typing_context)
+                await self._clear_typing_indicator(account, message, typing_context)
                 return True
             except Exception as send_exc:  # noqa: BLE001
+                await self._finish_typing_indicator(typing_task, typing_context)
+                await self._clear_typing_indicator(account, message, typing_context)
                 state.last_error = f"{exc}; send failure: {send_exc}"
                 return False
 
@@ -910,9 +1109,13 @@ class WeChatAdapter(ChannelAdapter):
                 reply_context_token,
             )
         except Exception as exc:  # noqa: BLE001
+            await self._finish_typing_indicator(typing_task, typing_context)
+            await self._clear_typing_indicator(account, message, typing_context)
             state.last_error = str(exc)
             return False
 
+        await self._finish_typing_indicator(typing_task, typing_context)
+        await self._clear_typing_indicator(account, message, typing_context)
         state.last_error = None
         return True
 

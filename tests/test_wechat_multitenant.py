@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+import xclaw.channels.wechat_multi_tenant as wechat_multi_tenant_module
 from xclaw.channels.wechat import (
     IlinkGetConfigResponse,
     IlinkGetUpdatesResponse,
     IlinkWireMessage,
-    PROCESSING_STATUS_MESSAGE,
     QRCodeResponse,
     QRStatusResponse,
 )
@@ -28,6 +28,7 @@ class FakeIlinkClient:
         self.status_by_qr: dict[str, QRStatusResponse] = {}
         self.updates_by_token: dict[str, list[IlinkGetUpdatesResponse]] = {}
         self.sent_messages: list[dict[str, str]] = []
+        self.config_calls: list[dict[str, str]] = []
         self.typing_calls: list[dict[str, str]] = []
         self.closed = False
 
@@ -74,22 +75,43 @@ class FakeIlinkClient:
         return {"ret": 0}
 
     async def get_config(
-        self, base_url: str, token: str,
+        self,
+        base_url: str,
+        token: str,
+        *,
+        to_user_id: str,
+        ilink_user_id: str,
+        context_token: str,
     ) -> IlinkGetConfigResponse:
+        self.config_calls.append(
+            {
+                "token": token,
+                "to_user_id": to_user_id,
+                "ilink_user_id": ilink_user_id,
+                "context_token": context_token,
+            }
+        )
         return IlinkGetConfigResponse(ret=0, typing_ticket="fake-ticket")
 
     async def send_typing(
         self,
         base_url: str,
         token: str,
+        *,
         to_user_id: str,
+        ilink_user_id: str,
         typing_ticket: str,
+        context_token: str | None = None,
+        status: int | None = None,
     ) -> None:
         self.typing_calls.append(
             {
                 "token": token,
                 "to_user_id": to_user_id,
+                "ilink_user_id": ilink_user_id,
                 "typing_ticket": typing_ticket,
+                "context_token": context_token or "",
+                "status": "" if status is None else str(status),
             }
         )
 
@@ -284,22 +306,23 @@ async def test_multitenant_manager_isolates_member_chat_ids(db: Database) -> Non
     assert handler.await_args_list[1].args[0] == build_member_chat_id(
         tenant["tenant_id"], member2["member_id"]
     )
-    assert ilink_client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
+    assert len(ilink_client.sent_messages) == 2
     assert ilink_client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
-    assert ilink_client.sent_messages[1]["to_user_id"] == "alice@im.wechat"
-    assert ilink_client.sent_messages[2]["text"] == PROCESSING_STATUS_MESSAGE
-    assert ilink_client.sent_messages[2]["to_user_id"] == "bob@im.wechat"
-    assert ilink_client.sent_messages[3]["to_user_id"] == "bob@im.wechat"
+    assert ilink_client.sent_messages[1]["to_user_id"] == "bob@im.wechat"
+    assert ilink_client.typing_calls == []
 
     await service.stop()
     assert ilink_client.closed is True
 
 
 @pytest.mark.asyncio
-async def test_multitenant_status_message_sent_before_reply(db: Database) -> None:
+async def test_multitenant_slow_reply_fetches_typing_and_clears(db: Database) -> None:
     ilink_client = FakeIlinkClient()
-    handler = AsyncMock(return_value="ok")
-    service = _make_service(db, ilink_client=ilink_client, handler=handler)
+    async def slow_handler(chat_id: str, text: str) -> str:
+        await asyncio.sleep(0.6)
+        return "ok"
+
+    service = _make_service(db, ilink_client=ilink_client, handler=slow_handler)
 
     tenant = await db.create_tenant("Tenant A")
     link = await db.create_invite_link(tenant["tenant_id"])
@@ -341,9 +364,156 @@ async def test_multitenant_status_message_sent_before_reply(db: Database) -> Non
 
     processed = await service.manager.poll_credential_once(credential["credential_id"])
     assert processed == 1
-    assert len(ilink_client.sent_messages) == 2
-    assert ilink_client.sent_messages[0]["text"] == PROCESSING_STATUS_MESSAGE
-    assert ilink_client.sent_messages[1]["text"] == "ok"
+    assert len(ilink_client.sent_messages) == 1
+    assert ilink_client.sent_messages[0]["text"] == "ok"
+    assert ilink_client.config_calls == [
+        {
+            "token": "token-1",
+            "to_user_id": "alice@im.wechat",
+            "ilink_user_id": "alice@im.wechat",
+            "context_token": "ctx-a",
+        }
+    ]
+    assert len(ilink_client.typing_calls) == 2
+    assert ilink_client.typing_calls[0]["context_token"] == "ctx-a"
+    assert ilink_client.typing_calls[0]["status"] == ""
+    assert ilink_client.typing_calls[1]["status"] == "2"
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multitenant_slow_send_keeps_typing_until_reply_sent(db: Database) -> None:
+    ilink_client = FakeIlinkClient()
+    handler = AsyncMock(return_value="ok")
+    service = _make_service(db, ilink_client=ilink_client, handler=handler)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-a",
+        qr_content="https://example.com/a.png",
+        ttl_seconds=90,
+    )
+    _, member, credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-1",
+        ilink_bot_id="bot-1",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-a",
+    )
+
+    original_send = ilink_client.send_text_message
+
+    async def delayed_send(
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> dict[str, int]:
+        await asyncio.sleep(0.6)
+        return await original_send(base_url, token, to_user_id, text, context_token)
+
+    ilink_client.send_text_message = delayed_send  # type: ignore[method-assign]
+
+    ilink_client.updates_by_token["token-1"] = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-1",
+            msgs=[
+                _make_text_message(
+                    "hello",
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-a",
+                    message_id="m-1",
+                )
+            ],
+        ),
+    ]
+
+    processed = await service.manager.poll_credential_once(credential["credential_id"])
+    assert processed == 1
+    assert len(ilink_client.sent_messages) == 1
+    assert ilink_client.sent_messages[0]["text"] == "ok"
+    assert len(ilink_client.config_calls) == 1
+    assert len(ilink_client.typing_calls) == 2
+    assert ilink_client.typing_calls[0]["status"] == ""
+    assert ilink_client.typing_calls[1]["status"] == "2"
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multitenant_long_reply_refreshes_typing_until_completion(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wechat_multi_tenant_module, "TYPING_TRIGGER_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(wechat_multi_tenant_module, "TYPING_REFRESH_INTERVAL_SECONDS", 0.05)
+
+    async def slow_handler(_chat_id: str, _text: str) -> str:
+        await asyncio.sleep(0.18)
+        return "ok"
+
+    ilink_client = FakeIlinkClient()
+    service = _make_service(db, ilink_client=ilink_client, handler=slow_handler)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-a",
+        qr_content="https://example.com/a.png",
+        ttl_seconds=90,
+    )
+    _, member, credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-1",
+        ilink_bot_id="bot-1",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-a",
+    )
+
+    ilink_client.updates_by_token["token-1"] = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-1",
+            msgs=[
+                _make_text_message(
+                    "hello",
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-a",
+                    message_id="m-refresh",
+                )
+            ],
+        ),
+    ]
+
+    processed = await service.manager.poll_credential_once(credential["credential_id"])
+    assert processed == 1
+    assert len(ilink_client.sent_messages) == 1
+    assert ilink_client.sent_messages[0]["text"] == "ok"
+    assert len(ilink_client.config_calls) == 1
+    assert len(ilink_client.typing_calls) >= 3
+    assert ilink_client.typing_calls[0]["status"] == ""
+    assert ilink_client.typing_calls[-1]["status"] == "2"
+    assert any(call["status"] == "" for call in ilink_client.typing_calls[1:-1])
 
     await service.stop()
 
