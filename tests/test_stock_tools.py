@@ -107,6 +107,35 @@ async def test_stock_quote_cn_falls_back_to_sina():
     assert "新浪直连 HTTP" in result.content
 
 
+@pytest.mark.asyncio
+async def test_stock_quote_future_cn():
+    tool = StockQuoteTool()
+    quote = {
+        "name": "螺纹钢主力",
+        "symbol": "RB0",
+        "price": "3456",
+        "change_pct": "1.23%",
+        "change_amount": "42",
+        "volume": "123456",
+        "amount": "N/A",
+        "open": "3410",
+        "high": "3468",
+        "low": "3402",
+        "pre_close": "3414",
+        "quote_time": "2026-04-14 10:15:00",
+        "source": "akshare:futures_zh_spot",
+    }
+    with patch("xclaw.tools.stock_quote.fetch_cn_future_quote", AsyncMock(return_value=quote)):
+        result = await tool.execute(
+            {"symbol": "rb0", "market": "CN", "asset_type": "future"},
+            _ctx(),
+        )
+    assert not result.is_error
+    assert "螺纹钢主力" in result.content
+    assert "RB0" in result.content
+    assert "akshare:futures_zh_spot" in result.content
+
+
 def test_normalize_hk_yf_symbol():
     assert normalize_hk_yf_symbol("00700") == "0700.HK"
     assert normalize_hk_yf_symbol("00700.HK") == "0700.HK"
@@ -219,6 +248,31 @@ async def test_stock_history_output_contains_precomputed_chg_and_amp():
 
 
 @pytest.mark.asyncio
+async def test_stock_history_future_cn_normalizes_lowercase_symbol():
+    mock_df = pd.DataFrame([
+        {"日期": "2024-01-01", "开盘": 3400.0, "收盘": 3450.0, "最高": 3460.0, "最低": 3390.0, "成交量": 120000},
+        {"日期": "2024-01-02", "开盘": 3450.0, "收盘": 3430.0, "最高": 3470.0, "最低": 3420.0, "成交量": 115000},
+    ])
+    mock_df.attrs["source"] = "akshare:get_futures_daily"
+
+    captured_symbol = {}
+
+    async def _capture(symbol, *, start_date, end_date):
+        captured_symbol["value"] = symbol
+        return mock_df
+
+    with patch("xclaw.tools.stock_history.fetch_cn_future_history_dataframe", _capture):
+        tool = StockHistoryTool()
+        result = await tool.execute(
+            {"symbol": "rb2410", "market": "CN", "asset_type": "future", "limit": 5},
+            _ctx(),
+        )
+    assert not result.is_error
+    assert captured_symbol["value"] == "RB2410"
+    assert "akshare:get_futures_daily" in result.content
+
+
+@pytest.mark.asyncio
 async def test_stock_gap_analysis_does_not_false_positive_on_overlap_dates():
     mock_df = pd.DataFrame([
         {"日期": "2026-03-16", "开盘": 19.66, "收盘": 19.48, "最高": 19.67, "最低": 19.28, "成交量": 1},
@@ -283,6 +337,54 @@ async def test_stock_indicators_cn():
     assert not result.is_error or "未安装" in result.content or "失败" in result.content
     # Should at least attempt to compute something
     assert "600519" in result.content or result.is_error
+
+
+@pytest.mark.asyncio
+async def test_stock_indicators_future_cn():
+    dates = pd.date_range("2024-01-01", periods=60, freq="D")
+    prices = [3400 + i * 3 for i in range(60)]
+    mock_df = pd.DataFrame({
+        "日期": dates,
+        "开盘": prices,
+        "收盘": prices,
+        "最高": [p + 10 for p in prices],
+        "最低": [p - 12 for p in prices],
+        "成交量": [120000] * 60,
+    })
+    mock_df.attrs["source"] = "akshare:get_futures_daily"
+    with patch("xclaw.tools.stock_indicators.fetch_cn_future_history_dataframe", AsyncMock(return_value=mock_df)):
+        tool = StockIndicatorsTool()
+        result = await tool.execute(
+            {"symbol": "rb0", "market": "CN", "asset_type": "future", "indicators": ["MA", "RSI"]},
+            _ctx(),
+        )
+    assert "RB0" in result.content or "rb0" in result.content or result.is_error
+    assert not result.is_error or "未安装" in result.content or "失败" in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_gap_analysis_future_cn():
+    mock_df = pd.DataFrame([
+        {"日期": "2026-03-01", "开盘": 3400.0, "收盘": 3410.0, "最高": 3420.0, "最低": 3390.0, "成交量": 1},
+        {"日期": "2026-03-02", "开盘": 3450.0, "收盘": 3460.0, "最高": 3470.0, "最低": 3440.0, "成交量": 1},
+        {"日期": "2026-03-03", "开盘": 3430.0, "收盘": 3420.0, "最高": 3435.0, "最低": 3380.0, "成交量": 1},
+    ])
+    mock_df.attrs["source"] = "akshare:get_futures_daily"
+
+    with patch("xclaw.tools.stock_gap_analysis.fetch_cn_future_history_dataframe", AsyncMock(return_value=mock_df)):
+        tool = StockGapAnalysisTool()
+        result = await tool.execute({"symbol": "rb0", "market": "CN", "asset_type": "future", "limit": 30}, _ctx())
+
+    assert not result.is_error
+    assert "RB0" in result.content
+    assert "向上跳空" in result.content
+
+
+def test_normalize_cn_future_symbol():
+    from xclaw.datasources.futures_cn import normalize_cn_future_symbol
+
+    assert normalize_cn_future_symbol("rb2410").symbol == "RB2410"
+    assert normalize_cn_future_symbol("rb0").symbol == "RB0"
 
 
 # ── stock_fundamentals ────────────────────────────────────────────────────────

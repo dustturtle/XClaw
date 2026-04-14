@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from xclaw.datasources.futures_cn import fetch_cn_future_quote
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
@@ -28,7 +29,7 @@ class StockQuoteTool(Tool):
 
     @property
     def description(self) -> str:
-        return "获取股票实时行情，包括当前价格、涨跌幅、成交量等。A 股优先走腾讯/新浪直连，美股和港股走 yfinance。"
+        return "获取股票或国内商品期货实时行情，包括当前价格、涨跌幅、成交量等。A 股优先走腾讯/新浪直连，美股和港股走 yfinance。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -37,13 +38,19 @@ class StockQuoteTool(Tool):
             "properties": {
                 "symbol": {
                     "type": "string",
-                    "description": "股票代码，如 '600519'（A股）、'00700'（港股）或 'AAPL'（美股）",
+                    "description": "标的代码，如 '600519'（A股）、'00700'（港股）、'AAPL'（美股）或 'RB0'（国内商品期货）",
                 },
                 "market": {
                     "type": "string",
                     "enum": ["CN", "US", "HK"],
                     "description": "市场（默认 CN）",
                     "default": "CN",
+                },
+                "asset_type": {
+                    "type": "string",
+                    "enum": ["stock", "future"],
+                    "description": "资产类型：stock=股票，future=国内商品期货",
+                    "default": "stock",
                 },
             },
             "required": ["symbol"],
@@ -56,9 +63,12 @@ class StockQuoteTool(Tool):
     async def execute(self, params: dict[str, Any], context: ToolContext) -> ToolResult:
         symbol = params.get("symbol", "").strip()
         market = params.get("market", "CN").upper()
+        asset_type = params.get("asset_type", "stock")
         if not symbol:
-            return ToolResult(content="股票代码不能为空", is_error=True)
+            return ToolResult(content="标的代码不能为空", is_error=True)
         try:
+            if market == "CN" and asset_type == "future":
+                return await self._future_quote(symbol)
             if market == "CN":
                 return await self._cn_quote(symbol)
             elif market in ("US", "HK"):
@@ -67,6 +77,10 @@ class StockQuoteTool(Tool):
                 return ToolResult(content=f"不支持的市场: {market}", is_error=True)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"获取行情失败: {exc}", is_error=True)
+
+    async def _future_quote(self, symbol: str) -> ToolResult:
+        quote = await fetch_cn_future_quote(symbol)
+        return ToolResult(content=self._format_cn_quote(quote))
 
     async def _cn_quote(self, symbol: str) -> ToolResult:
         normalized = self._normalize_cn_symbol(symbol)
@@ -263,7 +277,7 @@ class StockQuoteTool(Tool):
 
     def _format_cn_quote(self, quote: dict[str, str]) -> str:
         return (
-            f"股票: {quote['name']} ({quote['symbol']})\n"
+            f"标的: {quote['name']} ({quote['symbol']})\n"
             f"当前价: {quote['price']}\n"
             f"涨跌幅: {quote['change_pct']}\n"
             f"涨跌额: {quote['change_amount']}\n"

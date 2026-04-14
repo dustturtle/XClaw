@@ -36,7 +36,7 @@
 |------|------|
 | 🤖 **AI 引擎** | 支持 Anthropic Claude、OpenAI GPT、DeepSeek、Ollama（本地模型）|
 | 💬 **多渠道** | 飞书、企业微信、钉钉、QQ 群、微信公众号/小程序、Web REST + SSE |
-| 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻；A股数据源已形成分层与 failover 重构方案 |
+| 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻；同时支持国内商品期货的只读查询（行情、历史K线、技术指标、缺口分析）；A股数据源已形成分层与 failover 重构方案 |
 | 📊 **策略回测** | 均线交叉（SMA Cross）/ RSI 策略回测，输出总收益、最大回撤、Sharpe 比率、胜率 |
 | 🧠 **智能记忆** | 文件记忆（AGENTS.md）+ 结构化记忆 + **语义搜索**（字符二元组余弦相似度，纯 Python） |
 | 🔌 **Skills 系统** | 可插拔技能包，支持 **SKILL.md 目录**（Claude Agent Skills 协议）、YAML 声明式、Python 编程式三种定义方式 |
