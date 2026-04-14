@@ -27,6 +27,7 @@ from xclaw.channels.wechat_multi_tenant import (
     TenantSummaryPayload,
     build_invite_page,
 )
+from xclaw.investment.report_service import InvestmentReportService
 
 # Rate limiting (slowapi)
 try:
@@ -57,6 +58,26 @@ class WxMpLoginRequest(BaseModel):
 
 class WxMpLoginResponse(BaseModel):
     chat_id: str  # "wechat_mp_<openid>"
+
+
+class InvestmentReportRunRequest(BaseModel):
+    chat_id: int
+    market: str = "CN"
+    symbols: list[str] | None = None
+
+
+class InvestmentWatchlistRequest(BaseModel):
+    chat_id: int
+    symbol: str
+    market: str = "CN"
+    name: str = ""
+    notes: str = ""
+
+
+class InvestmentTaskRequest(BaseModel):
+    chat_id: int
+    description: str
+    cron_expression: str
 
 
 def _build_chat_page_html(
@@ -553,6 +574,38 @@ def _build_chat_page_html(
 """
 
 
+def _build_admin_page_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XClaw Investment Admin</title>
+  <style>
+    body { font-family: "Avenir Next", "PingFang SC", sans-serif; background: #f7f3ec; color: #2d2418; margin: 0; padding: 24px; }
+    .shell { max-width: 1100px; margin: 0 auto; background: #fffaf3; border: 1px solid #e7dccd; border-radius: 20px; padding: 24px; box-shadow: 0 18px 40px rgba(84, 56, 20, 0.08); }
+    h1 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .card { background: #fff; border: 1px solid #eadfce; border-radius: 16px; padding: 16px; }
+    code { background: #f5eee3; padding: 2px 6px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>投资日报后台</h1>
+    <p>统一查看日报历史、手动运行、自选股管理和日报任务。</p>
+    <div class="grid">
+      <div class="card"><strong>报告历史</strong><p><code>/api/investment/reports</code></p></div>
+      <div class="card"><strong>手动运行</strong><p><code>/api/investment/reports/run</code></p></div>
+      <div class="card"><strong>自选股管理</strong><p><code>/api/investment/watchlist</code></p></div>
+      <div class="card"><strong>日报任务</strong><p><code>/api/investment/tasks</code></p></div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
 def _user_namespace(token: str) -> str:
     """Derive a short, stable user-namespace string from a bearer token.
 
@@ -643,6 +696,10 @@ def create_web_app(
                 provider_name=provider_name,
             )
         )
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_page() -> HTMLResponse:
+        return HTMLResponse(_build_admin_page_html())
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -776,6 +833,12 @@ def create_web_app(
         """Return a sanitised view of the current settings (no secrets)."""
         if settings is None:
             raise HTTPException(status_code=503, detail="Settings not available")
+        strategy_bias_threshold = getattr(settings, "strategy_bias_threshold", 5.0)
+        if not isinstance(strategy_bias_threshold, (int, float)):
+            strategy_bias_threshold = 5.0
+        strategy_report_max_symbols = getattr(settings, "strategy_report_max_symbols", 10)
+        if not isinstance(strategy_report_max_symbols, int):
+            strategy_report_max_symbols = 10
         safe = {
             "llm_provider": settings.llm_provider,
             "model": settings.model,
@@ -792,6 +855,8 @@ def create_web_app(
             "data_dir": settings.data_dir,
             "timezone": settings.timezone,
             "stock_market_default": settings.stock_market_default,
+            "strategy_bias_threshold": strategy_bias_threshold,
+            "strategy_report_max_symbols": strategy_report_max_symbols,
             "bash_enabled": settings.bash_enabled,
             "rate_limit_per_minute": settings.rate_limit_per_minute,
             "multi_user_mode": getattr(settings, "multi_user_mode", False),
@@ -799,6 +864,106 @@ def create_web_app(
             "mcp_server_enabled": getattr(settings, "mcp_server_enabled", False) is True,
         }
         return JSONResponse(safe)
+
+    # ── Investment APIs ─────────────────────────────────────────────────────
+
+    @app.get("/api/investment/reports", dependencies=[Depends(verify_token)])
+    async def list_investment_reports(chat_id: int, limit: int = 20) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        rows = await db.list_investment_reports(chat_id, limit=min(limit, 50))
+        return JSONResponse(rows)
+
+    @app.get("/api/investment/reports/{report_id}", dependencies=[Depends(verify_token)])
+    async def get_investment_report(report_id: int) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        async with db.conn.execute(
+            "SELECT * FROM investment_reports WHERE id = ?",
+            (report_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Report not found")
+        return JSONResponse(dict(row))
+
+    @app.post("/api/investment/reports/run", dependencies=[Depends(verify_token)])
+    async def run_investment_report(payload: InvestmentReportRunRequest) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        service = InvestmentReportService(db=db, settings=settings)
+        report = await service.generate_report(
+            chat_id=payload.chat_id,
+            trigger_source="web_admin",
+            symbols=payload.symbols,
+            market=payload.market,
+        )
+        return JSONResponse(report)
+
+    @app.get("/api/investment/strategy-runs", dependencies=[Depends(verify_token)])
+    async def list_strategy_runs(chat_id: int, limit: int = 20) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        rows = await db.list_strategy_runs(chat_id, limit=min(limit, 50))
+        return JSONResponse(rows)
+
+    @app.get("/api/investment/watchlist", dependencies=[Depends(verify_token)])
+    async def get_investment_watchlist(chat_id: int) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        rows = await db.get_watchlist(chat_id)
+        return JSONResponse(rows)
+
+    @app.post("/api/investment/watchlist", dependencies=[Depends(verify_token)])
+    async def add_investment_watchlist(payload: InvestmentWatchlistRequest) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        await db.add_to_watchlist(
+            payload.chat_id,
+            payload.symbol.upper(),
+            payload.market.upper(),
+            name=payload.name or None,
+            notes=payload.notes or None,
+        )
+        return JSONResponse({"ok": True})
+
+    @app.delete("/api/investment/watchlist/{symbol}", dependencies=[Depends(verify_token)])
+    async def delete_investment_watchlist(chat_id: int, symbol: str, market: str = "CN") -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        removed = await db.remove_from_watchlist(chat_id, symbol.upper(), market.upper())
+        return JSONResponse({"ok": removed})
+
+    @app.get("/api/investment/tasks", dependencies=[Depends(verify_token)])
+    async def list_investment_tasks(chat_id: int) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        tasks = await db.get_active_tasks()
+        rows = [task for task in tasks if int(task["chat_id"]) == chat_id]
+        return JSONResponse(rows)
+
+    @app.post("/api/investment/tasks", dependencies=[Depends(verify_token)])
+    async def create_investment_task(payload: InvestmentTaskRequest) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        prompt = (
+            "生成今日自选股日报，输出市场概览、关键策略卡、风险提示和免责声明。"
+        )
+        task_id = await db.add_scheduled_task(
+            payload.chat_id,
+            description=payload.description,
+            prompt=prompt,
+            cron_expression=payload.cron_expression,
+        )
+        task = await db.get_scheduled_task(task_id)
+        return JSONResponse(task or {"id": task_id})
+
+    @app.delete("/api/investment/tasks/{task_id}", dependencies=[Depends(verify_token)])
+    async def delete_investment_task(task_id: int) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        await db.update_task_status(task_id, "cancelled")
+        return JSONResponse({"ok": True})
 
     # ── WeChat Official Account (公众号) webhook ───────────────────────────────
     _wechat_adapter: Any = None

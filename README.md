@@ -36,7 +36,7 @@
 |------|------|
 | 🤖 **AI 引擎** | 支持 Anthropic Claude、OpenAI GPT、DeepSeek、Ollama（本地模型）|
 | 💬 **多渠道** | 飞书、企业微信、钉钉、QQ 群、微信公众号/小程序、Web REST + SSE |
-| 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻；A股数据源已形成分层与 failover 重构方案 |
+| 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻、**策略买卖点扫描**、**自选股日报**；A股数据源已形成分层与 failover 重构方案 |
 | 📊 **策略回测** | 均线交叉（SMA Cross）/ RSI 策略回测，输出总收益、最大回撤、Sharpe 比率、胜率 |
 | 🧠 **智能记忆** | 文件记忆（AGENTS.md）+ 结构化记忆 + **语义搜索**（字符二元组余弦相似度，纯 Python） |
 | 🔌 **Skills 系统** | 可插拔技能包，支持 **SKILL.md 目录**（Claude Agent Skills 协议）、YAML 声明式、Python 编程式三种定义方式 |
@@ -158,6 +158,7 @@ xclaw doctor
 xclaw start
 # 默认在 http://127.0.0.1:8080 提供 Web API
 # 访问 http://127.0.0.1:8080/docs 查看 Swagger 文档
+# 访问 http://127.0.0.1:8080/admin 查看投资日报后台
 ```
 
 ### 5. 开始对话
@@ -209,6 +210,8 @@ curl -s -X POST http://127.0.0.1:8080/api/chat \
 |--------|--------|------|
 | `stock_market_default` | `CN` | 默认股票市场：`CN`（A股）/ `US`（美股）/ `HK`（港股） |
 | `stock_data_source` | `akshare` | 当前默认实现仍以 `akshare/yfinance` 直连为主；A 股重构后的推荐主链路与 failover 方案见[近期重大变更](#近期重大变更)和 [`datasource.md`](datasource.md) |
+| `strategy_bias_threshold` | `5.0` | 策略扫描的默认乖离率阈值（相对 MA5），超过阈值时优先提示“避免追高” |
+| `strategy_report_max_symbols` | `10` | 单份自选股日报最多分析的股票数量，超出部分需拆分或调整自选股 |
 
 ### 安全配置
 
@@ -426,6 +429,17 @@ wx.request({
 | `GET /api/sessions` | GET | ✅ | 查看会话列表 |
 | `GET /api/sessions/{id}/messages` | GET | ✅ | 查看会话历史消息 |
 | `GET /api/config` | GET | ✅ | 查看当前配置（已脱敏，不含 API Key）|
+| `GET /admin` | GET | 无 | 投资日报后台入口（轻量管理页） |
+| `GET /api/investment/reports` | GET | ✅ | 查看日报历史 |
+| `GET /api/investment/reports/{id}` | GET | ✅ | 查看指定日报详情 |
+| `POST /api/investment/reports/run` | POST | ✅ | 手动生成一份自选股日报 |
+| `GET /api/investment/strategy-runs` | GET | ✅ | 查看单股策略扫描历史 |
+| `GET /api/investment/watchlist` | GET | ✅ | 查看某个 chat 的投资自选股 |
+| `POST /api/investment/watchlist` | POST | ✅ | 添加自选股 |
+| `DELETE /api/investment/watchlist/{symbol}` | DELETE | ✅ | 删除自选股 |
+| `GET /api/investment/tasks` | GET | ✅ | 查看日报相关定时任务 |
+| `POST /api/investment/tasks` | POST | ✅ | 创建日报定时任务 |
+| `DELETE /api/investment/tasks/{id}` | DELETE | ✅ | 取消日报定时任务 |
 | `POST /api/auth/wechat/start` | POST | ✅ | 开始 iLink 微信二维码登录 |
 | `GET /api/auth/wechat/status/{login_id}` | GET | ✅ | 查询微信二维码登录状态 |
 | `GET /api/auth/wechat/session` | GET | ✅ | 查看当前微信 Bot 绑定状态 |
@@ -499,6 +513,8 @@ XClaw 内置以下工具，AI 会根据任务自动选择调用。
 | `watchlist_manage` | 自选股管理（add/remove/list）| "把茅台加入自选" |
 | `portfolio_manage` | 持仓管理（buy/sell/view/pnl）| "记录买了100股茅台" |
 | `stock_backtest` | 策略回测（见[投资回测](#投资回测)）| "回测茅台均线策略" |
+| `strategy_scan` | 单股策略扫描，输出参考买入区/止损/目标位 | "用策略分析 600519 的买卖点" |
+| `investment_report` | 自选股日报生成与历史查看 | "给我生成今天的自选股日报" |
 
 ### 记忆工具（`memory` skill）
 
@@ -524,6 +540,26 @@ remember: 我的风险偏好是保守型
 | `schedule_task` | 创建定时任务（cron 表达式或一次性）|
 | `list_scheduled_tasks` | 查看所有活跃定时任务 |
 | `cancel_scheduled_task` | 取消指定定时任务 |
+
+### 投资日报与策略扫描示例
+
+```
+用户：用策略分析一下 600519 的买点和止损位
+Agent：优先调用 strategy_scan，输出高价值策略、参考买入区、止损位和目标位
+
+用户：给我生成今天的自选股日报
+Agent：优先调用 investment_report，基于当前 watchlist 生成市场概览 + 个股策略卡
+
+用户：把贵州茅台和平安银行加入自选，然后每天 18:00 生成日报
+Agent：先调用 watchlist_manage 添加股票，再调用 schedule_task 创建日报任务
+```
+
+当前策略层默认支持 11 个策略名，并按两层实现：
+
+- 规则型：`bull_trend`、`ma_golden_cross`、`shrink_pullback`、`volume_breakout`、`bottom_volume`、`one_yang_three_yin`、`box_oscillation`
+- 框架型：`chan_theory`、`wave_theory`、`emotion_cycle`、`dragon_head`
+
+其中规则型策略会直接给出参考买入区、止损位、目标位；框架型策略会给出结构化条件点位与风险说明。所有结果仅供参考，不构成投资建议。
 
 ---
 
@@ -1072,6 +1108,9 @@ curl -X POST http://server/api/chat \
 ```
 用户：每天下午3点盘后给我推送上证指数涨跌情况
 Agent：已创建定时任务（每日 15:00）：查询大盘指数并推送摘要
+
+用户：每个工作日 18:00 生成我的自选股日报
+Agent：已创建定时任务（工作日 18:00）：生成自选股日报并推送摘要
 
 用户：每周一早9点提醒我查看上周报告
 Agent：已创建定时任务（每周一 09:00 cron: 0 9 * * 1）

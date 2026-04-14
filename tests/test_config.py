@@ -29,6 +29,8 @@ def test_defaults():
     assert s.wechat_enabled is False
     assert s.wechat_invite_refresh_seconds == 45
     assert s.wechat_invite_session_total_timeout_seconds == 90
+    assert s.strategy_bias_threshold == 5.0
+    assert s.strategy_report_max_symbols == 10
 
 
 def test_load_from_yaml(tmp_path: Path):
@@ -44,6 +46,8 @@ def test_load_from_yaml(tmp_path: Path):
             thinking: true
             web_port: 9090
             bash_enabled: false
+            strategy_bias_threshold: 6.5
+            strategy_report_max_symbols: 12
         """),
         encoding="utf-8",
     )
@@ -56,6 +60,8 @@ def test_load_from_yaml(tmp_path: Path):
     assert s.thinking is True
     assert s.web_port == 9090
     assert s.bash_enabled is False
+    assert s.strategy_bias_threshold == 6.5
+    assert s.strategy_report_max_symbols == 12
 
 
 def test_invalid_temperature():

@@ -85,6 +85,8 @@ class InvestmentSkill(Skill):
         from xclaw.tools.market_overview import MarketOverviewTool
         from xclaw.tools.stock_backtest import StockBacktestTool
         from xclaw.tools.stock_zt_pool import StockZTPoolTool
+        from xclaw.tools.strategy_scan import StrategyScanTool
+        from xclaw.tools.investment_report import InvestmentReportTool
 
         for tool_cls in (
             StockQuoteTool,
@@ -98,6 +100,8 @@ class InvestmentSkill(Skill):
             MarketOverviewTool,
             StockBacktestTool,
             StockZTPoolTool,
+            StrategyScanTool,
+            InvestmentReportTool,
         ):
             _safe_register(registry, tool_cls())
 

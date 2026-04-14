@@ -93,6 +93,28 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS investment_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER REFERENCES chats(id),
+    report_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content_markdown TEXT NOT NULL,
+    symbol_count INTEGER NOT NULL,
+    trigger_source TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER REFERENCES chats(id),
+    symbol TEXT NOT NULL,
+    market TEXT NOT NULL,
+    strategies_json TEXT NOT NULL,
+    valuable_strategies_json TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -448,6 +470,101 @@ class Database:
             (chat_id, model, input_tokens, output_tokens),
         )
         await self.conn.commit()
+
+    # ── Investment reports ───────────────────────────────────────────────────
+
+    async def add_investment_report(
+        self,
+        *,
+        chat_id: int,
+        report_type: str,
+        title: str,
+        summary: str,
+        content_markdown: str,
+        symbol_count: int,
+        trigger_source: str,
+    ) -> int:
+        async with self.conn.execute(
+            "INSERT INTO investment_reports "
+            "(chat_id, report_type, title, summary, content_markdown, symbol_count, trigger_source) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                chat_id,
+                report_type,
+                title,
+                summary,
+                content_markdown,
+                symbol_count,
+                trigger_source,
+            ),
+        ) as cur:
+            await self.conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+
+    async def get_latest_investment_report(self, chat_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM investment_reports WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_investment_reports(
+        self,
+        chat_id: int,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM investment_reports WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Strategy runs ────────────────────────────────────────────────────────
+
+    async def add_strategy_run(
+        self,
+        *,
+        chat_id: int,
+        symbol: str,
+        market: str,
+        strategies: list[dict[str, Any]],
+        valuable_strategies: list[dict[str, Any]],
+    ) -> int:
+        async with self.conn.execute(
+            "INSERT INTO strategy_runs "
+            "(chat_id, symbol, market, strategies_json, valuable_strategies_json) "
+            "VALUES (?,?,?,?,?)",
+            (
+                chat_id,
+                symbol,
+                market,
+                json.dumps(strategies, ensure_ascii=False),
+                json.dumps(valuable_strategies, ensure_ascii=False),
+            ),
+        ) as cur:
+            await self.conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+
+    async def list_strategy_runs(
+        self,
+        chat_id: int,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM strategy_runs WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["strategies"] = json.loads(item.pop("strategies_json"))
+            item["valuable_strategies"] = json.loads(item.pop("valuable_strategies_json"))
+            result.append(item)
+        return result
 
     # ── WeChat Multi-tenant Invite Flow ──────────────────────────────────────
 

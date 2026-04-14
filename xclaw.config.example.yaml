@@ -80,6 +80,8 @@ timezone: "Asia/Shanghai"
 # ── 投资配置 ──────────────────────────────────────────────────────────────────
 stock_market_default: "CN"         # CN | US | HK
 stock_data_source: "akshare"       # akshare | yfinance
+strategy_bias_threshold: 5.0       # 相对 MA5 的默认乖离率阈值，超过时优先提示避免追高
+strategy_report_max_symbols: 10    # 单份自选股日报最多分析多少只股票
 
 # ── 安全配置 ──────────────────────────────────────────────────────────────────
 control_chat_ids: []               # 管理员 chat ID 列表（High 风险操作需要）

@@ -139,3 +139,67 @@ async def test_llm_usage(db: Database):
     chat_id = await db.get_or_create_chat("web", "usage_user")
     await db.record_usage(chat_id, "claude-opus-4-5", 100, 200)
     # No assertion except it doesn't raise
+
+
+@pytest.mark.asyncio
+async def test_investment_report_crud(db: Database):
+    chat_id = await db.get_or_create_chat("web", "report_user")
+    report_id = await db.add_investment_report(
+        chat_id=chat_id,
+        report_type="daily_watchlist",
+        title="2026-04-14 自选股日报",
+        summary="2 只股票，其中 1 只偏多，1 只观望",
+        content_markdown="# 自选股日报\n\n内容",
+        symbol_count=2,
+        trigger_source="manual",
+    )
+
+    assert isinstance(report_id, int)
+
+    latest = await db.get_latest_investment_report(chat_id)
+    assert latest is not None
+    assert latest["id"] == report_id
+    assert latest["report_type"] == "daily_watchlist"
+    assert latest["symbol_count"] == 2
+
+    history = await db.list_investment_reports(chat_id, limit=10)
+    assert len(history) == 1
+    assert history[0]["title"] == "2026-04-14 自选股日报"
+
+
+@pytest.mark.asyncio
+async def test_strategy_run_crud(db: Database):
+    chat_id = await db.get_or_create_chat("web", "strategy_user")
+    run_id = await db.add_strategy_run(
+        chat_id=chat_id,
+        symbol="600519",
+        market="CN",
+        strategies=[
+            {
+                "strategy_id": "bull_trend",
+                "signal_status": "triggered",
+                "bias_score": 78,
+            },
+            {
+                "strategy_id": "ma_golden_cross",
+                "signal_status": "no_signal",
+                "bias_score": 42,
+            },
+        ],
+        valuable_strategies=[
+            {
+                "strategy_id": "bull_trend",
+                "signal_status": "triggered",
+                "bias_score": 78,
+            }
+        ],
+    )
+
+    assert isinstance(run_id, int)
+
+    rows = await db.list_strategy_runs(chat_id, limit=5)
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "600519"
+    assert rows[0]["market"] == "CN"
+    assert rows[0]["strategies"][0]["strategy_id"] == "bull_trend"
+    assert rows[0]["valuable_strategies"][0]["signal_status"] == "triggered"

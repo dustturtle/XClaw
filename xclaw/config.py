@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     # ── Stock / Investment ────────────────────────────────────────────────────
     stock_market_default: str = "CN"
     stock_data_source: str = "akshare"
+    strategy_bias_threshold: float = 5.0
+    strategy_report_max_symbols: int = 10
 
     # ── Security ──────────────────────────────────────────────────────────────
     control_chat_ids: list[str] = Field(default_factory=list)
@@ -132,6 +134,20 @@ class Settings(BaseSettings):
         allowed = {"CN", "US", "HK"}
         if v not in allowed:
             raise ValueError(f"stock_market_default must be one of {allowed}")
+        return v
+
+    @field_validator("strategy_bias_threshold")
+    @classmethod
+    def validate_strategy_bias_threshold(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("strategy_bias_threshold must be greater than 0")
+        return v
+
+    @field_validator("strategy_report_max_symbols")
+    @classmethod
+    def validate_strategy_report_max_symbols(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("strategy_report_max_symbols must be greater than 0")
         return v
 
     @field_validator("temperature")
