@@ -181,6 +181,10 @@ class Settings(BaseSettings):
         return self.data_path / "groups"
 
     @property
+    def report_exports_path(self) -> Path:
+        return self.data_path / "report_exports"
+
+    @property
     def wechat_account_path(self) -> Path:
         return self.data_path / "wechat_account.json"
 

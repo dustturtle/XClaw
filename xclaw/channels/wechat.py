@@ -29,13 +29,15 @@ from typing import Any, Callable, Coroutine, Protocol
 from urllib.parse import quote
 
 import httpx
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from xclaw.channels import ChannelAdapter
 
 BOT_TYPE = "3"
-CHANNEL_VERSION = "0.1.0"
+CHANNEL_VERSION = "2.1.8"
+ILINK_APP_ID = "bot"
 MSG_TYPE_USER = 1
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
@@ -44,6 +46,11 @@ MSG_ITEM_IMAGE = 2
 MSG_ITEM_VOICE = 3
 MSG_ITEM_FILE = 4
 MSG_ITEM_VIDEO = 5
+UPLOAD_MEDIA_IMAGE = 1
+UPLOAD_MEDIA_VIDEO = 2
+UPLOAD_MEDIA_FILE = 3
+UPLOAD_MEDIA_VOICE = 4
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 
 BACKOFF_DELAYS_SECONDS = (1, 3, 10)
 MAX_RECENT_MESSAGE_IDS = 200
@@ -146,6 +153,14 @@ class WechatBotStatusPayload(BaseModel):
 class IlinkGetConfigResponse(BaseModel):
     ret: int = 0
     typing_ticket: str = ""
+
+
+class IlinkGetUploadURLResponse(BaseModel):
+    ret: int = 0
+    errmsg: str = ""
+    upload_param: str = ""
+    thumb_upload_param: str = ""
+    upload_full_url: str = ""
 
 
 class WechatState(BaseModel):
@@ -377,6 +392,26 @@ class IlinkClient(Protocol):
         context_token: str,
     ) -> dict[str, Any]: ...
 
+    async def send_image_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def send_file_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, Any]: ...
+
     async def get_config(
         self,
         base_url: str,
@@ -526,6 +561,67 @@ class HttpIlinkClient:
             )
         return dict(payload) if isinstance(payload, dict) else {}
 
+    async def send_image_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        media = await self._upload_media(
+            base_url=base_url,
+            token=token,
+            to_user_id=to_user_id,
+            content_base64=content_base64,
+            media_type=UPLOAD_MEDIA_IMAGE,
+        )
+        return await self._send_media_message(
+            base_url=base_url,
+            token=token,
+            to_user_id=to_user_id,
+            context_token=context_token,
+            item={
+                "type": MSG_ITEM_IMAGE,
+                "image_item": {
+                    "media": media["media"],
+                    "mid_size": media["ciphertext_size"],
+                },
+            },
+        )
+
+    async def send_file_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, Any]:
+        media = await self._upload_media(
+            base_url=base_url,
+            token=token,
+            to_user_id=to_user_id,
+            content_base64=content_base64,
+            media_type=UPLOAD_MEDIA_FILE,
+        )
+        return await self._send_media_message(
+            base_url=base_url,
+            token=token,
+            to_user_id=to_user_id,
+            context_token=context_token,
+            item={
+                "type": MSG_ITEM_FILE,
+                "file_item": {
+                    "media": media["media"],
+                    "file_name": filename,
+                    "len": str(media["plaintext_size"]),
+                },
+            },
+        )
+
     async def get_config(
         self,
         base_url: str,
@@ -608,12 +704,14 @@ class HttpIlinkClient:
         token: str,
         timeout_seconds: float,
     ) -> dict[str, Any]:
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = _build_post_headers(token)
+        headers["Content-Length"] = str(len(raw))
         try:
             response = await self._client.post(
                 url,
                 headers=headers,
-                json=body,
+                content=raw,
                 timeout=timeout_seconds,
             )
             response.raise_for_status()
@@ -622,6 +720,145 @@ class HttpIlinkClient:
             raise
         except (httpx.HTTPError, ValueError) as exc:
             raise IlinkClientError(f"iLink request failed: {exc}") from exc
+
+    async def _send_media_message(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        context_token: str | None = None,
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        url = f"{_resolve_ilink_api_root(base_url)}bot/sendmessage"
+        msg: dict[str, Any] = {
+            "from_user_id": "",
+            "to_user_id": to_user_id,
+            "client_id": _generate_client_id(),
+            "message_type": MSG_TYPE_BOT,
+            "message_state": MSG_STATE_FINISH,
+            "item_list": [item],
+        }
+        if context_token:
+            msg["context_token"] = context_token
+        body = {
+            "msg": msg,
+            "base_info": {"channel_version": CHANNEL_VERSION},
+        }
+        payload = await self._post_json(
+            url,
+            body=body,
+            token=token,
+            timeout_seconds=self._request_timeout_seconds,
+        )
+        if isinstance(payload, dict) and payload.get("ret") not in (None, 0):
+            raise IlinkClientError(
+                "sendmessage failed: "
+                f"errcode={payload.get('errcode', payload.get('ret'))} "
+                f"errmsg={payload.get('errmsg', 'unknown')}"
+            )
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    async def _upload_media(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        content_base64: str,
+        media_type: int,
+    ) -> dict[str, Any]:
+        plaintext = base64.b64decode(content_base64)
+        plaintext_size = len(plaintext)
+        ciphertext_size = _aes_ecb_padded_size(plaintext_size)
+        plaintext_md5 = hashlib.md5(plaintext).hexdigest()
+        filekey = secrets.token_hex(16)
+        aes_key = secrets.token_bytes(16)
+        aes_key_hex = aes_key.hex()
+        upload = await self._get_upload_url(
+            base_url=base_url,
+            token=token,
+            to_user_id=to_user_id,
+            filekey=filekey,
+            media_type=media_type,
+            plaintext_size=plaintext_size,
+            plaintext_md5=plaintext_md5,
+            ciphertext_size=ciphertext_size,
+            aes_key_hex=aes_key_hex,
+        )
+        upload_url = upload.upload_full_url.strip()
+        if not upload_url:
+            upload_param = upload.upload_param.strip()
+            if not upload_param:
+                raise IlinkClientError("getuploadurl failed: missing upload URL")
+            upload_url = _build_cdn_upload_url(upload_param, filekey)
+        ciphertext = _encrypt_aes_ecb(plaintext, aes_key)
+        download_param = await self._upload_ciphertext(upload_url=upload_url, ciphertext=ciphertext)
+        return {
+            "media": {
+                "encrypt_query_param": download_param,
+                "aes_key": base64.b64encode(aes_key_hex.encode("utf-8")).decode("utf-8"),
+                "encrypt_type": 1,
+            },
+            "plaintext_size": plaintext_size,
+            "ciphertext_size": len(ciphertext),
+        }
+
+    async def _get_upload_url(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filekey: str,
+        media_type: int,
+        plaintext_size: int,
+        plaintext_md5: str,
+        ciphertext_size: int,
+        aes_key_hex: str,
+    ) -> IlinkGetUploadURLResponse:
+        url = f"{_resolve_ilink_api_root(base_url)}bot/getuploadurl"
+        payload = await self._post_json(
+            url,
+            body={
+                "filekey": filekey,
+                "media_type": media_type,
+                "to_user_id": to_user_id,
+                "rawsize": plaintext_size,
+                "rawfilemd5": plaintext_md5,
+                "filesize": ciphertext_size,
+                "no_need_thumb": True,
+                "aeskey": aes_key_hex,
+                "base_info": {"channel_version": CHANNEL_VERSION},
+            },
+            token=token,
+            timeout_seconds=self._request_timeout_seconds,
+        )
+        try:
+            response = IlinkGetUploadURLResponse.model_validate(payload)
+        except Exception as exc:  # pragma: no cover
+            raise IlinkClientError(f"Failed to parse getuploadurl response: {exc}") from exc
+        if response.ret not in (None, 0):
+            raise IlinkClientError(
+                f"getuploadurl failed: errcode={response.ret} errmsg={response.errmsg or 'unknown'}"
+            )
+        return response
+
+    async def _upload_ciphertext(self, *, upload_url: str, ciphertext: bytes) -> str:
+        try:
+            response = await self._client.post(
+                upload_url,
+                headers={"Content-Type": "application/octet-stream"},
+                content=ciphertext,
+                timeout=self._request_timeout_seconds * 6,
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise IlinkClientError(f"iLink CDN upload failed: {exc}") from exc
+        download_param = response.headers.get("x-encrypted-param", "").strip()
+        if not download_param:
+            raise IlinkClientError("iLink CDN upload failed: missing x-encrypted-param")
+        return download_param
 
 
 def normalize_polled_message(message: IlinkWireMessage) -> NormalizedWechatInbound | None:
@@ -699,6 +936,8 @@ def _build_post_headers(token: str) -> dict[str, str]:
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
         "X-WECHAT-UIN": encoded_uin,
+        "iLink-App-Id": ILINK_APP_ID,
+        "iLink-App-ClientVersion": str(_encode_client_version(CHANNEL_VERSION)),
         "Authorization": f"Bearer {token.strip()}",
     }
 
@@ -720,6 +959,38 @@ def _build_message_id(message: IlinkWireMessage, sender_id: str, text: str) -> s
 
 def _generate_client_id() -> str:
     return f"xclaw:{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+
+
+def _encode_client_version(version: str) -> int:
+    major, minor, patch = 0, 0, 0
+    parts = version.split(".")
+    if len(parts) >= 1:
+        major = int(parts[0] or 0)
+    if len(parts) >= 2:
+        minor = int(parts[1] or 0)
+    if len(parts) >= 3:
+        patch = int(parts[2] or 0)
+    return ((major & 0xFF) << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF)
+
+
+def _aes_ecb_padded_size(plaintext_size: int) -> int:
+    return ((plaintext_size + 1 + 15) // 16) * 16
+
+
+def _encrypt_aes_ecb(plaintext: bytes, key: bytes) -> bytes:
+    pad = 16 - (len(plaintext) % 16)
+    padded = plaintext + bytes([pad]) * pad
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
+
+
+def _build_cdn_upload_url(upload_param: str, filekey: str) -> str:
+    return (
+        f"{CDN_BASE_URL}/upload"
+        f"?encrypted_query_param={quote(upload_param, safe='')}"
+        f"&filekey={quote(filekey, safe='')}"
+    )
 
 
 def _resolve_ilink_api_root(base_url: str) -> str:
@@ -914,6 +1185,12 @@ class WeChatAdapter(ChannelAdapter):
         if not context_token:
             raise RuntimeError(f"Missing context_token for chat_id={chat_id}")
         await self._deliver_text(chat_id, text, context_token)
+
+    async def send_image_response(self, chat_id: str, image_path: Path) -> None:
+        await self._deliver_image(chat_id, image_path, None)
+
+    async def send_file_response(self, chat_id: str, file_path: Path) -> None:
+        await self._deliver_file(chat_id, file_path, None)
 
     async def stop(
         self,
@@ -1153,6 +1430,28 @@ class WeChatAdapter(ChannelAdapter):
             raise RuntimeError("WeChat account is not linked.")
         await self._deliver_text_with_account(account, chat_id, text, context_token)
 
+    async def _deliver_image(
+        self,
+        chat_id: str,
+        image_path: Path,
+        context_token: str | None,
+    ) -> None:
+        account = self._account_store.load()
+        if account is None:
+            raise RuntimeError("WeChat account is not linked.")
+        await self._deliver_image_with_account(account, chat_id, image_path, context_token)
+
+    async def _deliver_file(
+        self,
+        chat_id: str,
+        file_path: Path,
+        context_token: str | None,
+    ) -> None:
+        account = self._account_store.load()
+        if account is None:
+            raise RuntimeError("WeChat account is not linked.")
+        await self._deliver_file_with_account(account, chat_id, file_path, context_token)
+
     async def _deliver_text_with_account(
         self,
         account: WechatAccount,
@@ -1166,6 +1465,40 @@ class WeChatAdapter(ChannelAdapter):
             account.bot_token,
             chat_id,
             clean_text,
+            context_token,
+        )
+
+    async def _deliver_image_with_account(
+        self,
+        account: WechatAccount,
+        chat_id: str,
+        image_path: Path,
+        context_token: str | None,
+    ) -> None:
+        payload = base64.b64encode(image_path.read_bytes()).decode()
+        await self._ilink_client.send_image_message(
+            account.base_url,
+            account.bot_token,
+            chat_id,
+            image_path.name,
+            payload,
+            context_token,
+        )
+
+    async def _deliver_file_with_account(
+        self,
+        account: WechatAccount,
+        chat_id: str,
+        file_path: Path,
+        context_token: str | None,
+    ) -> None:
+        payload = base64.b64encode(file_path.read_bytes()).decode()
+        await self._ilink_client.send_file_message(
+            account.base_url,
+            account.bot_token,
+            chat_id,
+            file_path.name,
+            payload,
             context_token,
         )
 

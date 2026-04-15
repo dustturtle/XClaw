@@ -203,3 +203,31 @@ async def test_strategy_run_crud(db: Database):
     assert rows[0]["market"] == "CN"
     assert rows[0]["strategies"][0]["strategy_id"] == "bull_trend"
     assert rows[0]["valuable_strategies"][0]["signal_status"] == "triggered"
+
+
+@pytest.mark.asyncio
+async def test_report_export_crud(db: Database):
+    chat_id = await db.get_or_create_chat("web", "export_user")
+    report_id = await db.add_investment_report(
+        chat_id=chat_id,
+        report_type="daily_watchlist",
+        title="2026-04-14 自选股日报",
+        summary="导出测试",
+        content_markdown="# 导出测试",
+        symbol_count=1,
+        trigger_source="manual",
+    )
+
+    export_id = await db.add_report_export(
+        report_id=report_id,
+        asset_type="pdf",
+        mime_type="application/pdf",
+        file_path="/tmp/report.pdf",
+        status="ready",
+    )
+    assert isinstance(export_id, int)
+
+    rows = await db.list_report_exports(report_id)
+    assert len(rows) == 1
+    assert rows[0]["asset_type"] == "pdf"
+    assert rows[0]["file_path"] == "/tmp/report.pdf"

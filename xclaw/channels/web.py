@@ -5,11 +5,12 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -28,6 +29,7 @@ from xclaw.channels.wechat_multi_tenant import (
     build_invite_page,
 )
 from xclaw.investment.report_service import InvestmentReportService
+from xclaw.investment.report_export_service import ReportExportService
 
 # Rate limiting (slowapi)
 try:
@@ -78,6 +80,12 @@ class InvestmentTaskRequest(BaseModel):
     chat_id: int
     description: str
     cron_expression: str
+
+
+class InvestmentDeliverRequest(BaseModel):
+    chat_id: str
+    channel: str = "wechat"
+    mode: str = "image+pdf"
 
 
 def _build_chat_page_html(
@@ -899,6 +907,49 @@ def create_web_app(
             market=payload.market,
         )
         return JSONResponse(report)
+
+    @app.post("/api/investment/reports/{report_id}/exports/regenerate", dependencies=[Depends(verify_token)])
+    async def regenerate_investment_exports(report_id: int) -> JSONResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        service = ReportExportService(db=db, settings=settings)
+        assets = await service.generate_assets(report_id)
+        return JSONResponse(assets)
+
+    @app.get("/api/investment/reports/{report_id}/pdf", dependencies=[Depends(verify_token)])
+    async def download_investment_pdf(report_id: int) -> FileResponse:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        exports = await db.list_report_exports(report_id)
+        pdf = next((item for item in exports if item["asset_type"] == "pdf"), None)
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF export not found")
+        return FileResponse(pdf["file_path"], media_type="application/pdf", filename="report.pdf")
+
+    @app.post("/api/investment/reports/{report_id}/deliver", dependencies=[Depends(verify_token)])
+    async def deliver_investment_report(report_id: int, payload: InvestmentDeliverRequest) -> JSONResponse:
+        if payload.channel != "wechat":
+            raise HTTPException(status_code=400, detail="Only wechat delivery is supported in v1")
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database not available")
+        if _wechat_adapter is None:
+            raise HTTPException(status_code=503, detail="WeChat adapter not configured")
+
+        service = ReportExportService(db=db, settings=settings)
+        assets = await service.generate_assets(report_id)
+
+        try:
+            if "image" in payload.mode:
+                for image in assets.get("images", []):
+                    await _wechat_adapter.send_image_response(payload.chat_id, Path(image["file_path"]))
+            if "pdf" in payload.mode:
+                pdf = assets.get("pdf")
+                if pdf:
+                    await _wechat_adapter.send_file_response(payload.chat_id, Path(pdf["file_path"]))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return JSONResponse({"ok": True, "delivered_mode": payload.mode})
 
     @app.get("/api/investment/strategy-runs", dependencies=[Depends(verify_token)])
     async def list_strategy_runs(chat_id: int, limit: int = 20) -> JSONResponse:

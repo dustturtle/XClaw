@@ -115,6 +115,16 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS report_exports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER REFERENCES investment_reports(id),
+    asset_type TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -521,6 +531,14 @@ class Database:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_investment_report(self, report_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM investment_reports WHERE id = ?",
+            (report_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
     # ── Strategy runs ────────────────────────────────────────────────────────
 
     async def add_strategy_run(
@@ -565,6 +583,40 @@ class Database:
             item["valuable_strategies"] = json.loads(item.pop("valuable_strategies_json"))
             result.append(item)
         return result
+
+    # ── Report exports ───────────────────────────────────────────────────────
+
+    async def add_report_export(
+        self,
+        *,
+        report_id: int,
+        asset_type: str,
+        mime_type: str,
+        file_path: str,
+        status: str,
+    ) -> int:
+        async with self.conn.execute(
+            "INSERT INTO report_exports (report_id, asset_type, mime_type, file_path, status) "
+            "VALUES (?,?,?,?,?)",
+            (report_id, asset_type, mime_type, file_path, status),
+        ) as cur:
+            await self.conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+
+    async def list_report_exports(self, report_id: int) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM report_exports WHERE report_id = ? ORDER BY id ASC",
+            (report_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def clear_report_exports(self, report_id: int) -> None:
+        await self.conn.execute(
+            "DELETE FROM report_exports WHERE report_id = ?",
+            (report_id,),
+        )
+        await self.conn.commit()
 
     # ── WeChat Multi-tenant Invite Flow ──────────────────────────────────────
 

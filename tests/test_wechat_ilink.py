@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,6 +16,7 @@ import xclaw.channels.wechat as wechat_module
 from xclaw.channels.wechat import (
     EMPTY_REPLY_MESSAGE,
     HANDLER_FAILURE_MESSAGE,
+    HttpIlinkClient,
     IlinkGetConfigResponse,
     IlinkGetUpdatesResponse,
     IlinkWireMessage,
@@ -42,6 +45,8 @@ class FakeIlinkClient:
         self.qr_statuses = qr_statuses or []
         self.updates = updates or []
         self.sent_messages: list[dict[str, str]] = []
+        self.sent_images: list[dict[str, str]] = []
+        self.sent_files: list[dict[str, str]] = []
         self.config_calls: list[dict[str, str]] = []
         self.typing_calls: list[dict[str, str]] = []
         self.closed = False
@@ -76,8 +81,52 @@ class FakeIlinkClient:
     ) -> dict[str, int]:
         self.sent_messages.append(
             {
+                "base_url": base_url,
+                "token": token,
                 "to_user_id": to_user_id,
                 "text": text,
+                "context_token": context_token,
+            }
+        )
+        return {"ret": 0}
+
+    async def send_image_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None,
+    ) -> dict[str, int]:
+        self.sent_images.append(
+            {
+                "base_url": base_url,
+                "token": token,
+                "to_user_id": to_user_id,
+                "filename": filename,
+                "content_base64": content_base64,
+                "context_token": context_token,
+            }
+        )
+        return {"ret": 0}
+
+    async def send_file_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None,
+    ) -> dict[str, int]:
+        self.sent_files.append(
+            {
+                "base_url": base_url,
+                "token": token,
+                "to_user_id": to_user_id,
+                "filename": filename,
+                "content_base64": content_base64,
                 "context_token": context_token,
             }
         )
@@ -244,6 +293,162 @@ async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
     assert state.last_error is None
 
     await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_wechat_send_image_and_file_response(tmp_path: Path) -> None:
+    adapter, client = _make_adapter(tmp_path)
+    _save_account(adapter)
+
+    image_path = tmp_path / "report.png"
+    file_path = tmp_path / "report.pdf"
+    image_path.write_bytes(b"png-data")
+    file_path.write_bytes(b"pdf-data")
+
+    await adapter.send_image_response("alice@im.wechat", image_path)
+    await adapter.send_file_response("alice@im.wechat", file_path)
+
+    assert client.sent_images[0]["filename"] == "report.png"
+    assert client.sent_images[0]["context_token"] is None
+    assert client.sent_files[0]["filename"] == "report.pdf"
+    assert client.sent_files[0]["context_token"] is None
+
+
+@pytest.mark.asyncio
+async def test_wechat_media_delivery_uses_local_xclaw_account_only(tmp_path: Path) -> None:
+    adapter, client = _make_adapter(tmp_path)
+    _save_account(adapter)
+
+    image_path = tmp_path / "report.png"
+    image_path.write_bytes(b"png-data")
+
+    await adapter.send_image_response("alice@im.wechat", image_path)
+
+    assert client.sent_images[0]["token"] == "token-1"
+    assert client.sent_images[0]["to_user_id"] == "alice@im.wechat"
+
+
+@pytest.mark.asyncio
+async def test_wechat_text_delivery_uses_local_xclaw_context_only(tmp_path: Path) -> None:
+    adapter, client = _make_adapter(tmp_path)
+    _save_account(adapter)
+    state = adapter._state_store.load()
+    state.context_tokens["alice@im.wechat"] = "ctx-local"
+    adapter._state_store.save(state)
+
+    await adapter.send_response("alice@im.wechat", "你好")
+
+    assert client.sent_messages[0]["token"] == "token-1"
+    assert client.sent_messages[0]["context_token"] == "ctx-local"
+    assert client.sent_messages[0]["text"] == "你好"
+
+
+@pytest.mark.asyncio
+async def test_http_ilink_client_uploads_and_sends_image() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/ilink/bot/getuploadurl"):
+            return httpx.Response(200, json={"upload_param": "upload-param"})
+        if request.url.host == "novac2c.cdn.weixin.qq.com":
+            return httpx.Response(200, headers={"x-encrypted-param": "download-param"})
+        if request.url.path.endswith("/ilink/bot/sendmessage"):
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = HttpIlinkClient(transport=httpx.MockTransport(handler))
+
+    await client.send_image_message(
+        "https://ilinkai.weixin.qq.com",
+        "bot-token",
+        "alice@im.wechat",
+        "report.png",
+        "cG5nLWRhdGE=",
+        "ctx-1",
+    )
+    await client.close()
+
+    assert len(requests) == 3
+    upload_body = json.loads(requests[0].content)
+    assert upload_body["media_type"] == 1
+    assert upload_body["to_user_id"] == "alice@im.wechat"
+    assert upload_body["no_need_thumb"] is True
+
+    send_body = json.loads(requests[2].content)
+    image_item = send_body["msg"]["item_list"][0]["image_item"]
+    assert image_item["media"]["encrypt_query_param"] == "download-param"
+    assert image_item["media"]["aes_key"]
+    assert image_item["mid_size"] >= len(b"png-data")
+    assert send_body["msg"]["context_token"] == "ctx-1"
+
+
+@pytest.mark.asyncio
+async def test_http_ilink_client_uploads_and_sends_file() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/ilink/bot/getuploadurl"):
+            return httpx.Response(200, json={"upload_full_url": "https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=upload-full"})
+        if request.url.host == "novac2c.cdn.weixin.qq.com":
+            return httpx.Response(200, headers={"x-encrypted-param": "download-file"})
+        if request.url.path.endswith("/ilink/bot/sendmessage"):
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = HttpIlinkClient(transport=httpx.MockTransport(handler))
+
+    await client.send_file_message(
+        "https://ilinkai.weixin.qq.com",
+        "bot-token",
+        "alice@im.wechat",
+        "report.pdf",
+        "cGRmLWRhdGE=",
+        "ctx-1",
+    )
+    await client.close()
+
+    assert len(requests) == 3
+    upload_body = json.loads(requests[0].content)
+    assert upload_body["media_type"] == 3
+
+    send_body = json.loads(requests[2].content)
+    file_item = send_body["msg"]["item_list"][0]["file_item"]
+    assert file_item["media"]["encrypt_query_param"] == "download-file"
+    assert file_item["file_name"] == "report.pdf"
+    assert file_item["len"] == str(len(b"pdf-data"))
+    assert send_body["msg"]["context_token"] == "ctx-1"
+
+
+@pytest.mark.asyncio
+async def test_http_ilink_client_omits_context_token_for_media_when_missing() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/ilink/bot/getuploadurl"):
+            return httpx.Response(200, json={"upload_param": "upload-param"})
+        if request.url.host == "novac2c.cdn.weixin.qq.com":
+            return httpx.Response(200, headers={"x-encrypted-param": "download-param"})
+        if request.url.path.endswith("/ilink/bot/sendmessage"):
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = HttpIlinkClient(transport=httpx.MockTransport(handler))
+
+    await client.send_image_message(
+        "https://ilinkai.weixin.qq.com",
+        "bot-token",
+        "alice@im.wechat",
+        "report.png",
+        "cG5nLWRhdGE=",
+        None,
+    )
+    await client.close()
+
+    send_body = json.loads(requests[2].content)
+    assert "context_token" not in send_body["msg"]
 
 
 @pytest.mark.asyncio
