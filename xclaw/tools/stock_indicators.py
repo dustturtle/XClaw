@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from xclaw.datasources.a_share import fetch_cn_history_dataframe
+from xclaw.datasources.futures_cn import (
+    fetch_cn_future_history_dataframe,
+    normalize_cn_future_symbol,
+)
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
@@ -18,7 +22,7 @@ class StockIndicatorsTool(Tool):
 
     @property
     def description(self) -> str:
-        return "计算股票技术指标，支持 MA（移动平均）、MACD、RSI、KDJ、BOLL（布林带）等。"
+        return "计算股票或国内商品期货技术指标，支持 MA（移动平均）、MACD、RSI、KDJ、BOLL（布林带）等。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -27,12 +31,18 @@ class StockIndicatorsTool(Tool):
             "properties": {
                 "symbol": {
                     "type": "string",
-                    "description": "股票代码",
+                    "description": "标的代码",
                 },
                 "market": {
                     "type": "string",
                     "enum": ["CN", "US", "HK"],
                     "default": "CN",
+                },
+                "asset_type": {
+                    "type": "string",
+                    "enum": ["stock", "future"],
+                    "default": "stock",
+                    "description": "资产类型：stock=股票，future=国内商品期货",
                 },
                 "indicators": {
                     "type": "array",
@@ -59,25 +69,37 @@ class StockIndicatorsTool(Tool):
 
         symbol = params.get("symbol", "").strip()
         market = params.get("market", "CN").upper()
+        asset_type = params.get("asset_type", "stock")
         indicators = params.get("indicators", ["MA", "MACD", "RSI"])
         period_days = int(params.get("period_days", 120))
 
         if not symbol:
-            return ToolResult(content="股票代码不能为空", is_error=True)
+            return ToolResult(content="标的代码不能为空", is_error=True)
 
         start_date = (date.today() - timedelta(days=period_days)).strftime("%Y%m%d")
         end_date = date.today().strftime("%Y%m%d")
+        display_symbol = (
+            normalize_cn_future_symbol(symbol).symbol
+            if market == "CN" and asset_type == "future"
+            else symbol
+        )
 
         try:
             loop = asyncio.get_event_loop()
-            df = await self._fetch_data(symbol, market, start_date, end_date, loop)
+            df = await self._fetch_data(symbol, market, asset_type, start_date, end_date, loop)
             if df is None or df.empty:
-                return ToolResult(content=f"无法获取 {symbol} 的历史数据", is_error=True)
-            return self._compute_indicators(df, indicators, symbol, df.attrs.get("source"))
+                return ToolResult(content=f"无法获取 {display_symbol} 的历史数据", is_error=True)
+            return self._compute_indicators(df, indicators, display_symbol, df.attrs.get("source"))
         except Exception as exc:  # noqa: BLE001
             return ToolResult(content=f"计算指标失败: {exc}", is_error=True)
 
-    async def _fetch_data(self, symbol, market, start_date, end_date, loop):
+    async def _fetch_data(self, symbol, market, asset_type, start_date, end_date, loop):
+        if market == "CN" and asset_type == "future":
+            return await fetch_cn_future_history_dataframe(
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+            )
         if market == "CN":
             return await fetch_cn_history_dataframe(
                 symbol,

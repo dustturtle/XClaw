@@ -10,6 +10,10 @@ from xclaw.datasources.a_share import (
     _INDEX_BARE_TO_PREFIXED,
     fetch_cn_history_dataframe,
 )
+from xclaw.datasources.futures_cn import (
+    fetch_cn_future_history_dataframe,
+    normalize_cn_future_symbol,
+)
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
@@ -24,7 +28,7 @@ class StockGapAnalysisTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "精确分析股票或指数最近一段时间的日线跳空缺口，并判断是否已回补。"
+            "精确分析股票、指数或国内商品期货最近一段时间的日线跳空缺口，并判断是否已回补。"
             "当用户询问“有没有缺口”“缺口是否回补”这类问题时，应优先使用本工具，"
             "不要自己根据K线手算。"
         )
@@ -45,9 +49,9 @@ class StockGapAnalysisTool(Tool):
                 },
                 "asset_type": {
                     "type": "string",
-                    "enum": ["stock", "index"],
+                    "enum": ["stock", "index", "future"],
                     "default": "stock",
-                    "description": "资产类型：stock=个股，index=指数。",
+                    "description": "资产类型：stock=个股，index=指数，future=国内商品期货。",
                 },
                 "start_date": {
                     "type": "string",
@@ -90,10 +94,16 @@ class StockGapAnalysisTool(Tool):
         ).strftime("%Y-%m-%d")
 
         if not symbol:
-            return ToolResult(content="股票代码不能为空", is_error=True)
+            return ToolResult(content="标的代码不能为空", is_error=True)
 
         try:
-            if market == "CN":
+            if market == "CN" and asset_type == "future":
+                df = await fetch_cn_future_history_dataframe(
+                    symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            elif market == "CN":
                 df = await fetch_cn_history_dataframe(
                     symbol,
                     period="daily",
@@ -116,7 +126,7 @@ class StockGapAnalysisTool(Tool):
 
         df = df.tail(limit).reset_index(drop=True)
         gaps = self._detect_gaps(df)
-        display_symbol = symbol.upper()
+        display_symbol = normalize_cn_future_symbol(symbol).symbol if asset_type == "future" and market == "CN" else symbol.upper()
         source = df.attrs.get("source", "unknown")
         return ToolResult(content=self._format_gap_report(display_symbol, source, len(df), gaps))
 

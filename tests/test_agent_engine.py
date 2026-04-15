@@ -280,6 +280,13 @@ def test_build_system_prompt_includes_gap_routing_rule():
     assert "不要根据 stock_history 返回的K线自行手算缺口" in prompt
 
 
+def test_build_system_prompt_mentions_domestic_futures():
+    ctx = MagicMock()
+    ctx.settings = None
+    prompt = _build_system_prompt(ctx)
+    assert "商品期货" in prompt
+
+
 def test_normalize_final_text_fallback():
     assert _normalize_final_text("") == "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
     assert _normalize_final_text("有内容") == "有内容"
