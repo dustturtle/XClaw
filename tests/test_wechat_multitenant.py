@@ -28,6 +28,8 @@ class FakeIlinkClient:
         self.status_by_qr: dict[str, QRStatusResponse] = {}
         self.updates_by_token: dict[str, list[IlinkGetUpdatesResponse]] = {}
         self.sent_messages: list[dict[str, str]] = []
+        self.sent_images: list[dict[str, str | None]] = []
+        self.sent_files: list[dict[str, str | None]] = []
         self.config_calls: list[dict[str, str]] = []
         self.typing_calls: list[dict[str, str]] = []
         self.closed = False
@@ -69,6 +71,46 @@ class FakeIlinkClient:
                 "token": token,
                 "to_user_id": to_user_id,
                 "text": text,
+                "context_token": context_token,
+            }
+        )
+        return {"ret": 0}
+
+    async def send_image_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, int]:
+        self.sent_images.append(
+            {
+                "token": token,
+                "to_user_id": to_user_id,
+                "filename": filename,
+                "content_base64": content_base64,
+                "context_token": context_token,
+            }
+        )
+        return {"ret": 0}
+
+    async def send_file_message(
+        self,
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        filename: str,
+        content_base64: str,
+        context_token: str | None = None,
+    ) -> dict[str, int]:
+        self.sent_files.append(
+            {
+                "token": token,
+                "to_user_id": to_user_id,
+                "filename": filename,
+                "content_base64": content_base64,
                 "context_token": context_token,
             }
         )
@@ -551,5 +593,54 @@ async def test_multitenant_service_send_response_to_member_chat(db: Database) ->
     assert ilink_client.sent_messages[0]["to_user_id"] == "alice@im.wechat"
     assert ilink_client.sent_messages[0]["text"] == "提醒内容"
     assert ilink_client.sent_messages[0]["context_token"] == "ctx-send"
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multitenant_service_send_image_and_file_to_member_chat(
+    db: Database,
+    tmp_path: Path,
+) -> None:
+    ilink_client = FakeIlinkClient()
+    service = _make_service(db, ilink_client=ilink_client)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-send-media",
+        qr_content="https://example.com/send-media.png",
+        ttl_seconds=90,
+    )
+    _, member, _credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-send",
+        ilink_bot_id="bot-send",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-send-media",
+    )
+
+    image_path = tmp_path / "report.png"
+    file_path = tmp_path / "report.pdf"
+    image_path.write_bytes(b"png-data")
+    file_path.write_bytes(b"pdf-data")
+
+    chat_id = build_member_chat_id(tenant["tenant_id"], member["member_id"])
+    await service.send_image_response(chat_id, image_path)
+    await service.send_file_response(chat_id, file_path)
+
+    assert ilink_client.sent_images[0]["to_user_id"] == "alice@im.wechat"
+    assert ilink_client.sent_images[0]["filename"] == "report.png"
+    assert ilink_client.sent_images[0]["context_token"] == "ctx-send-media"
+    assert ilink_client.sent_files[0]["to_user_id"] == "alice@im.wechat"
+    assert ilink_client.sent_files[0]["filename"] == "report.pdf"
+    assert ilink_client.sent_files[0]["context_token"] == "ctx-send-media"
 
     await service.stop()

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import html
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 from loguru import logger
@@ -908,22 +910,11 @@ class MultiTenantBotManager:
 
     async def send_response(self, member_chat_id: str, text: str) -> None:
         tenant_id, member_id = parse_member_chat_id(member_chat_id)
-        member_row = await self.db.get_member(member_id)
-        if member_row is None:
-            raise RuntimeError(f"Unknown tenant member: {member_id}")
-        member = TenantMemberRecord.model_validate(member_row)
-        if member.tenant_id != tenant_id:
-            raise RuntimeError(f"Tenant member mismatch for chat_id={member_chat_id}")
-
-        credential_row = await self.db.get_active_credential_for_member(member_id)
-        if credential_row is None:
-            raise RuntimeError(f"No active credential for member_id={member_id}")
-        credential = ChannelCredentialRecord.model_validate(credential_row)
-
-        runtime = MemberRuntimeStateRecord.model_validate(
-            await self.db.get_runtime_state(member_id, tenant_id)
+        member, credential, context_token = await self._resolve_delivery_target(
+            member_chat_id=member_chat_id,
+            tenant_id=tenant_id,
+            member_id=member_id,
         )
-        context_token = runtime.context_token.strip()
         if not context_token:
             raise RuntimeError(f"Missing context_token for member_id={member_id}")
 
@@ -940,6 +931,74 @@ class MultiTenantBotManager:
             tenant_id=tenant_id,
             last_error=None,
         )
+
+    async def send_image_response(self, member_chat_id: str, image_path: Path) -> None:
+        tenant_id, member_id = parse_member_chat_id(member_chat_id)
+        member, credential, context_token = await self._resolve_delivery_target(
+            member_chat_id=member_chat_id,
+            tenant_id=tenant_id,
+            member_id=member_id,
+        )
+        payload = base64.b64encode(image_path.read_bytes()).decode()
+        await self.ilink_client.send_image_message(
+            credential.base_url,
+            credential.bot_token,
+            member.ilink_user_id,
+            image_path.name,
+            payload,
+            context_token or None,
+        )
+        await self.db.update_runtime_state(
+            member_id,
+            tenant_id=tenant_id,
+            last_error=None,
+        )
+
+    async def send_file_response(self, member_chat_id: str, file_path: Path) -> None:
+        tenant_id, member_id = parse_member_chat_id(member_chat_id)
+        member, credential, context_token = await self._resolve_delivery_target(
+            member_chat_id=member_chat_id,
+            tenant_id=tenant_id,
+            member_id=member_id,
+        )
+        payload = base64.b64encode(file_path.read_bytes()).decode()
+        await self.ilink_client.send_file_message(
+            credential.base_url,
+            credential.bot_token,
+            member.ilink_user_id,
+            file_path.name,
+            payload,
+            context_token or None,
+        )
+        await self.db.update_runtime_state(
+            member_id,
+            tenant_id=tenant_id,
+            last_error=None,
+        )
+
+    async def _resolve_delivery_target(
+        self,
+        *,
+        member_chat_id: str,
+        tenant_id: str,
+        member_id: str,
+    ) -> tuple[TenantMemberRecord, ChannelCredentialRecord, str]:
+        member_row = await self.db.get_member(member_id)
+        if member_row is None:
+            raise RuntimeError(f"Unknown tenant member: {member_id}")
+        member = TenantMemberRecord.model_validate(member_row)
+        if member.tenant_id != tenant_id:
+            raise RuntimeError(f"Tenant member mismatch for chat_id={member_chat_id}")
+
+        credential_row = await self.db.get_active_credential_for_member(member_id)
+        if credential_row is None:
+            raise RuntimeError(f"No active credential for member_id={member_id}")
+        credential = ChannelCredentialRecord.model_validate(credential_row)
+
+        runtime = MemberRuntimeStateRecord.model_validate(
+            await self.db.get_runtime_state(member_id, tenant_id)
+        )
+        return member, credential, runtime.context_token.strip()
 
 
 class WeChatMultiTenantService:
@@ -986,6 +1045,12 @@ class WeChatMultiTenantService:
 
     async def send_response(self, member_chat_id: str, text: str) -> None:
         await self.manager.send_response(member_chat_id, text)
+
+    async def send_image_response(self, member_chat_id: str, image_path: Path) -> None:
+        await self.manager.send_image_response(member_chat_id, image_path)
+
+    async def send_file_response(self, member_chat_id: str, file_path: Path) -> None:
+        await self.manager.send_file_response(member_chat_id, file_path)
 
 
 __all__ = [

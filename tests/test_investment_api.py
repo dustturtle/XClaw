@@ -271,3 +271,62 @@ async def test_investment_report_deliver_returns_wechat_error_detail(db, tmp_pat
 
     assert resp.status_code == 502
     assert "errcode=-2" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_investment_report_deliver_to_multitenant_wechat_api(db, tmp_path):
+    chat_id = await db.get_or_create_chat("web", "api_deliver_tenant_user")
+    report_id = await db.add_investment_report(
+        chat_id=chat_id,
+        report_type="daily_watchlist",
+        title="2026-04-14 自选股日报",
+        summary="多租户投递测试",
+        content_markdown="# report",
+        symbol_count=1,
+        trigger_source="manual",
+    )
+    image_path = tmp_path / "tenant_summary.png"
+    pdf_path = tmp_path / "tenant_report.pdf"
+    image_path.write_bytes(b"png")
+    pdf_path.write_bytes(b"pdf")
+
+    app = create_web_app(message_handler=_handler, db=db, settings=Settings())
+    fake_service = _FakeWechatAdapter()
+    app.state.set_wechat_multi_tenant_service(fake_service)
+    client = TestClient(app)
+
+    fake_assets = {
+        "pdf": {
+            "id": 1,
+            "asset_type": "pdf",
+            "mime_type": "application/pdf",
+            "file_path": str(pdf_path),
+            "status": "ready",
+        },
+        "images": [
+            {
+                "id": 2,
+                "asset_type": "summary_png",
+                "mime_type": "image/png",
+                "file_path": str(image_path),
+                "status": "ready",
+            }
+        ],
+    }
+
+    with patch(
+        "xclaw.channels.web.ReportExportService.generate_assets",
+        AsyncMock(return_value=fake_assets),
+    ):
+        resp = client.post(
+            f"/api/investment/reports/{report_id}/deliver",
+            json={
+                "chat_id": "tenant:tenant-1:member:member-1",
+                "channel": "wechat",
+                "mode": "image+pdf",
+            },
+        )
+
+    assert resp.status_code == 200
+    fake_service.send_image_response.assert_awaited_once()
+    fake_service.send_file_response.assert_awaited_once()
