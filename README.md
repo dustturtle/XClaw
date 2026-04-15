@@ -291,18 +291,36 @@ dingtalk_app_secret: "xxxx"
 dingtalk_robot_code: "xxxx"
 ```
 
-### QQ 群（QQ Group）
+### QQ Bot（C2C + Group）
 
 1. 在 [QQ 开放平台](https://q.qq.com) 注册并创建机器人应用
 2. 获取 `AppID` 和 `AppSecret`
-3. 设置消息回调地址：`https://your-host/webhook/qq`
-4. 配置文件：
+3. 为机器人申请 `GROUP_AND_C2C` 等必要 intents 权限
+4. 启动 XClaw 后，QQ 渠道会主动通过 gateway / websocket 建立长连接
+5. 配置文件：
 
 ```yaml
 qq_enabled: true
-qq_app_id: "your_app_id"
-qq_app_secret: "your_app_secret"
+qq_accounts:
+  - key: "default"
+    app_id: "your_app_id"
+    app_secret: "your_app_secret"
+    dm_enabled: true
+    group_enabled: true
+    require_mention: true
+    typing_enabled: true
+    streaming_enabled: true
 ```
+
+能力边界：
+
+- 支持 C2C 私聊和 QQ 群 @消息
+- 入站采用 gateway / websocket，不依赖 webhook 回调
+- 输入指示器仅在 C2C 私聊启用
+- 流式回复仅在 C2C 私聊启用
+- 语音输入优先使用平台转写文本；缺失时尝试 STT
+- 出站多媒体当前支持图片和文件
+- 第一版不做 guild/channel，不做视频和 TTS 输出
 
 ### 微信（WeChat / iLink 二维码登录）
 
@@ -461,7 +479,6 @@ wx.request({
 | `POST /webhook/feishu` | POST | 飞书事件推送 |
 | `POST /webhook/wecom` | POST | 企业微信消息接收 |
 | `POST /webhook/dingtalk` | POST | 钉钉消息接收 |
-| `POST /webhook/qq` | POST | QQ 群消息接收 |
 | `GET /webhook/wechat_mp` | GET | 微信公众号 URL 验证（echostr challenge）|
 | `POST /webhook/wechat_mp` | POST | 微信公众号消息接收 |
 | `POST /api/wxmp/login` | POST | 微信小程序登录（`code` 换 `chat_id`）|

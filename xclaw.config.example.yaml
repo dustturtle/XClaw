@@ -64,8 +64,22 @@ wechat_mp_encoding_aes_key: ""     # 消息加解密 Key（可选，启用加密
 # QQ 群（QQ Open Platform 官方机器人）
 # 需要在 QQ 开放平台 (https://q.qq.com) 注册机器人应用。
 qq_enabled: false
-qq_app_id: ""                      # QQ 机器人 AppID
-qq_app_secret: ""                  # QQ 机器人 AppSecret
+qq_app_id: ""                      # 兼容单账号模式：QQ 机器人 AppID
+qq_app_secret: ""                  # 兼容单账号模式：QQ 机器人 AppSecret
+qq_accounts:                       # 推荐：多账号配置
+  - key: "default"
+    app_id: ""
+    app_secret: ""
+    dm_enabled: true               # 支持 C2C 私聊
+    group_enabled: true            # 支持 QQ 群 @消息
+    group_policy: "open"           # open | allowlist | disabled
+    allowed_group_openids: []      # group_policy=allowlist 时生效
+    require_mention: true          # 群聊默认要求 @机器人
+    ignore_other_mentions: true
+    typing_enabled: true           # 仅私聊生效
+    streaming_enabled: true        # 仅私聊生效
+    markdown_enabled: true
+    stt_enabled: true              # 语音缺少平台转写时尝试 STT
 
 # ── 会话管理 ──────────────────────────────────────────────────────────────────
 max_session_messages: 40           # 超过此数量触发上下文压缩

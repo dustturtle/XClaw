@@ -91,8 +91,13 @@ async def run(settings: Settings) -> None:
     scheduler = None
 
     # ── Build message handler ─────────────────────────────────────────────────
-    async def handle_message(external_chat_id: str, text: str, channel: str = "web") -> str:
-        chat_id = await db.get_or_create_chat(channel, external_chat_id)
+    async def handle_message(
+        external_chat_id: str,
+        text: str,
+        channel: str = "web",
+        chat_type: str = "private",
+    ) -> str:
+        chat_id = await db.get_or_create_chat(channel, external_chat_id, chat_type=chat_type)
         ctx = AgentContext(
             chat_id=chat_id,
             channel=channel,
@@ -105,6 +110,21 @@ async def run(settings: Settings) -> None:
             scheduler=scheduler,
         )
         return await agent_loop(ctx, text)
+
+    async def handle_message_stream(
+        external_chat_id: str,
+        text: str,
+        channel: str = "web",
+        chat_type: str = "private",
+    ):
+        reply = await handle_message(external_chat_id, text, channel, chat_type)
+        if not reply:
+            return
+        chunk_size = 120
+        start = 0
+        while start < len(reply):
+            yield reply[start : start + chunk_size]
+            start += chunk_size
 
     # ── Start channel adapters ────────────────────────────────────────────────
     adapters = []
@@ -192,12 +212,29 @@ async def run(settings: Settings) -> None:
         adapter_by_channel["wechat_mp"] = wechat_mp
 
     if settings.qq_enabled:
-        from xclaw.channels.qq import QQAdapter
+        from xclaw.channels.qq import DefaultQQSTTClient, QQAdapter
 
+        qq_stt_client = None
+        if settings.api_key and (
+            settings.base_url or settings.llm_provider in {"openai", "deepseek", "ollama"}
+        ):
+            default_urls = {
+                "openai": "https://api.openai.com/v1",
+                "deepseek": "https://api.deepseek.com/v1",
+                "ollama": "http://localhost:11434/v1",
+            }
+            qq_stt_client = DefaultQQSTTClient(
+                api_key=settings.api_key,
+                base_url=(settings.base_url or default_urls.get(settings.llm_provider, "")).rstrip("/"),
+                model="gpt-4o-mini-transcribe",
+            )
         qq = QQAdapter(
             app_id=settings.qq_app_id,
             app_secret=settings.qq_app_secret,
-            message_handler=lambda cid, text: handle_message(cid, text, "qq"),
+            accounts=[account.model_dump() for account in settings.qq_accounts] if settings.qq_accounts else None,
+            message_handler=lambda cid, text, chat_type="private": handle_message(cid, text, "qq", chat_type),
+            stream_handler=lambda cid, text, chat_type="private": handle_message_stream(cid, text, "qq", chat_type),
+            stt_client=qq_stt_client,
         )
         adapters.append(qq)
         adapter_by_channel["qq"] = qq
@@ -249,6 +286,7 @@ async def run(settings: Settings) -> None:
 
         web_app = create_web_app(
             message_handler=lambda cid, text: handle_message(cid, text, "web"),
+            stream_handler=lambda cid, text: handle_message_stream(cid, text, "web"),
             auth_token=settings.web_auth_token,
             rate_limit=settings.rate_limit_per_minute,
             db=db,
@@ -277,13 +315,6 @@ async def run(settings: Settings) -> None:
                 if isinstance(adapter, WeChatMPAdapter):
                     web_app.state.set_wechat_mp_adapter(adapter)
                     break
-        if settings.qq_enabled:
-            from xclaw.channels.qq import QQAdapter
-            for adapter in adapters:
-                if isinstance(adapter, QQAdapter):
-                    web_app.state.set_qq_adapter(adapter)
-                    break
-
         config = uvicorn.Config(
             web_app,
             host=settings.web_host,

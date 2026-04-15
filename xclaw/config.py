@@ -7,8 +7,24 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class QQAccountSettings(BaseModel):
+    key: str = "default"
+    app_id: str
+    app_secret: str
+    dm_enabled: bool = True
+    group_enabled: bool = True
+    group_policy: str = "open"
+    allowed_group_openids: list[str] = Field(default_factory=list)
+    require_mention: bool = True
+    ignore_other_mentions: bool = True
+    typing_enabled: bool = True
+    streaming_enabled: bool = True
+    markdown_enabled: bool = True
+    stt_enabled: bool = True
 
 
 class Settings(BaseSettings):
@@ -86,6 +102,7 @@ class Settings(BaseSettings):
     qq_enabled: bool = False
     qq_app_id: str = ""
     qq_app_secret: str = ""
+    qq_accounts: list[QQAccountSettings] = Field(default_factory=list)
 
     # ── Session management ────────────────────────────────────────────────────
     max_session_messages: int = 40

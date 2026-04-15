@@ -64,6 +64,39 @@ def test_load_from_yaml(tmp_path: Path):
     assert s.strategy_report_max_symbols == 12
 
 
+def test_load_qq_accounts_from_yaml(tmp_path: Path):
+    config_file = tmp_path / "qq.yaml"
+    config_file.write_text(
+        textwrap.dedent("""
+            qq_enabled: true
+            qq_accounts:
+              - key: desk
+                app_id: app-1
+                app_secret: secret-1
+                dm_enabled: true
+                group_enabled: false
+                typing_enabled: true
+                streaming_enabled: true
+              - key: ops
+                app_id: app-2
+                app_secret: secret-2
+                group_enabled: true
+                group_policy: allowlist
+                allowed_group_openids:
+                  - group-1
+                  - group-2
+        """),
+        encoding="utf-8",
+    )
+    s = load_settings(config_file)
+    assert s.qq_enabled is True
+    assert len(s.qq_accounts) == 2
+    assert s.qq_accounts[0].key == "desk"
+    assert s.qq_accounts[0].group_enabled is False
+    assert s.qq_accounts[1].group_policy == "allowlist"
+    assert s.qq_accounts[1].allowed_group_openids == ["group-1", "group-2"]
+
+
 def test_invalid_temperature():
     """An invalid temperature should raise a ValidationError."""
     from pydantic import ValidationError

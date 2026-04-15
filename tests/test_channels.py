@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -252,10 +253,69 @@ async def test_dingtalk_start_stop():
 # ── QQ adapter ────────────────────────────────────────────────────────────────
 
 def _make_qq(handler=None) -> QQAdapter:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_access_token(self) -> str:
+            return "token"
+
+        async def get_gateway_url(self) -> str:
+            return "wss://gateway.example.com"
+
+        async def send_c2c_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_group_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_c2c_input_notify(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_c2c_stream_message(self, *args, **kwargs):
+            return {"id": "stream-1"}
+
+        async def send_c2c_image_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_group_image_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_c2c_file_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def send_group_file_message(self, *args, **kwargs):
+            return {"id": "1"}
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _FakeGateway:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def send(self, data: str) -> None:
+            self.sent.append(data)
+
+        async def recv(self) -> str:
+            await asyncio.sleep(3600)
+            return ""
+
+        async def close(self) -> None:
+            return None
+
+    async def _gateway_connect(url: str):
+        return _FakeGateway()
+
     return QQAdapter(
         app_id="app_id",
         app_secret="secret",
         message_handler=handler or AsyncMock(return_value="ok"),
+        client_factory=lambda account: _FakeClient(),
+        gateway_connect=_gateway_connect,
     )
 
 
@@ -275,7 +335,7 @@ async def test_qq_receive_group_message():
     with patch.object(adapter, "send_response", new=AsyncMock()):
         result = await adapter.handle_event(payload)
     assert result == {"msg": "ok"}
-    handler.assert_called_once_with("group123:msg456", "你好机器人")
+    handler.assert_called_once_with("qq:default:group:group123", "你好机器人", "group")
 
 
 @pytest.mark.asyncio
@@ -293,7 +353,7 @@ async def test_qq_receive_group_message_no_msg_id():
     with patch.object(adapter, "send_response", new=AsyncMock()):
         result = await adapter.handle_event(payload)
     assert result == {"msg": "ok"}
-    handler.assert_called_once_with("group123", "测试消息")
+    handler.assert_called_once_with("qq:default:group:group123", "测试消息", "group")
 
 
 @pytest.mark.asyncio
@@ -334,8 +394,7 @@ async def test_qq_unknown_event_type():
 async def test_qq_start_stop():
     adapter = _make_qq()
     await adapter.start()
-    with patch.object(adapter._client, "aclose", new=AsyncMock()):
-        await adapter.stop()
+    await adapter.stop()
 
 
 # ── Web channel (FastAPI) ─────────────────────────────────────────────────────
@@ -408,13 +467,6 @@ def test_web_feishu_webhook_not_configured():
     app = _make_web_app()
     client = TestClient(app)
     resp = client.post("/webhook/feishu", json={"type": "url_verification", "challenge": "x"})
-    assert resp.status_code == 503
-
-
-def test_web_qq_webhook_not_configured():
-    app = _make_web_app()
-    client = TestClient(app)
-    resp = client.post("/webhook/qq", json={"op": 0, "t": "GROUP_AT_MESSAGE_CREATE", "d": {}})
     assert resp.status_code == 503
 
 
