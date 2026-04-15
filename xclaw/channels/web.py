@@ -932,20 +932,27 @@ def create_web_app(
             raise HTTPException(status_code=400, detail="Only wechat delivery is supported in v1")
         if db is None:
             raise HTTPException(status_code=503, detail="Database not available")
-        if _wechat_adapter is None:
-            raise HTTPException(status_code=503, detail="WeChat adapter not configured")
 
         service = ReportExportService(db=db, settings=settings)
         assets = await service.generate_assets(report_id)
 
+        if payload.chat_id.startswith("tenant:"):
+            if _wechat_multi_tenant_service is None:
+                raise HTTPException(status_code=503, detail="WeChat multi-tenant service not configured")
+            media_adapter = _wechat_multi_tenant_service
+        else:
+            if _wechat_adapter is None:
+                raise HTTPException(status_code=503, detail="WeChat adapter not configured")
+            media_adapter = _wechat_adapter
+
         try:
             if "image" in payload.mode:
                 for image in assets.get("images", []):
-                    await _wechat_adapter.send_image_response(payload.chat_id, Path(image["file_path"]))
+                    await media_adapter.send_image_response(payload.chat_id, Path(image["file_path"]))
             if "pdf" in payload.mode:
                 pdf = assets.get("pdf")
                 if pdf:
-                    await _wechat_adapter.send_file_response(payload.chat_id, Path(pdf["file_path"]))
+                    await media_adapter.send_file_response(payload.chat_id, Path(pdf["file_path"]))
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
