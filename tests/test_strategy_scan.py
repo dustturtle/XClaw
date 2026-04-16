@@ -126,3 +126,24 @@ async def test_strategy_scan_tool_persists_strategy_run(db):
     assert len(runs) == 1
     assert runs[0]["symbol"] == "600519"
     assert runs[0]["valuable_strategies"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_scan_supports_decision_card_output():
+    df = _df_from_closes(
+        [10.0, 10.05, 10.1, 10.18, 10.25, 10.35, 10.45, 10.55, 10.7, 10.82, 10.9, 10.96]
+    )
+    tool = StrategyScanTool()
+
+    with patch(
+        "xclaw.investment.strategy_engine.fetch_cn_history_dataframe",
+        AsyncMock(return_value=df),
+    ):
+        result = await tool.execute(
+            {"symbol": "600519", "market": "CN", "output_mode": "decision_card"},
+            _ctx(),
+        )
+
+    assert not result.is_error
+    assert "策略决策卡" in result.content
+    assert "综合结论" in result.content

@@ -75,6 +75,10 @@ class InvestmentSkill(Skill):
 
     def register_tools(self, registry: ToolRegistry, settings: Any) -> None:
         from xclaw.tools.stock_quote import StockQuoteTool
+        from xclaw.tools.stock_correlation import StockCorrelationTool
+        from xclaw.tools.earnings_analysis import EarningsAnalysisTool
+        from xclaw.tools.etf_premium_analysis import ETFPremiumAnalysisTool
+        from xclaw.tools.stock_liquidity import StockLiquidityTool
         from xclaw.tools.stock_gap_analysis import StockGapAnalysisTool
         from xclaw.tools.stock_history import StockHistoryTool
         from xclaw.tools.stock_indicators import StockIndicatorsTool
@@ -90,6 +94,10 @@ class InvestmentSkill(Skill):
 
         for tool_cls in (
             StockQuoteTool,
+            StockCorrelationTool,
+            EarningsAnalysisTool,
+            ETFPremiumAnalysisTool,
+            StockLiquidityTool,
             StockGapAnalysisTool,
             StockHistoryTool,
             StockIndicatorsTool,

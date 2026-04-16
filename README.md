@@ -523,8 +523,12 @@ XClaw 内置以下工具，AI 会根据任务自动选择调用。
 |--------|------|------|
 | `stock_quote` | 实时行情（A股/美股/港股）| "查 600519 的价格" |
 | `stock_history` | 历史 K 线（日/周/月线）| "茅台近90天K线" |
+| `stock_correlation` | 多标的联动性/相关矩阵分析 | "AAPL 和 MSFT 过去60天相关性如何" |
+| `etf_premium_analysis` | ETF 溢价/折价分析 | "QQQ 现在是溢价还是折价" |
+| `stock_liquidity` | 流动性分析（日均成交额/冲击成本） | "茅台最近一个月流动性怎么样" |
 | `stock_indicators` | 技术指标（MA/MACD/RSI/KDJ/BOLL）| "查茅台 RSI 指标" |
 | `stock_fundamentals` | 财务基本面（PE/PB/营收/利润等）| "茅台财务数据" |
+| `earnings_analysis` | 美股/港股财报前瞻、回顾、预期分析 | "AAPL 下次财报前瞻" |
 | `stock_news` | 个股或市场新闻 | "茅台最新新闻" |
 | `market_overview` | 大盘指数概览（上证/深证/创业板等）| "今天大盘怎样？" |
 | `watchlist_manage` | 自选股管理（add/remove/list）| "把茅台加入自选" |

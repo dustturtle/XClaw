@@ -12,6 +12,8 @@ from xclaw.tools import ToolContext, ToolResult
 from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 from xclaw.tools.market_overview import MarketOverviewTool
 from xclaw.tools.portfolio import PortfolioManageTool
+from xclaw.tools.stock_correlation import StockCorrelationTool
+from xclaw.tools.earnings_analysis import EarningsAnalysisTool
 from xclaw.tools.stock_fundamentals import StockFundamentalsTool
 from xclaw.tools.stock_gap_analysis import StockGapAnalysisTool
 from xclaw.tools.stock_history import StockHistoryTool
@@ -143,6 +145,272 @@ def test_normalize_hk_yf_symbol():
     assert normalize_hk_yf_symbol("09992") == "9992.HK"
     assert normalize_hk_yf_symbol("09992.HK") == "9992.HK"
     assert normalize_hk_yf_symbol("9992.HK") == "9992.HK"
+
+
+# ── stock_correlation ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stock_correlation_cn_pair_analysis():
+    tool = StockCorrelationTool()
+    df_a = pd.DataFrame(
+        [
+            {"日期": "2024-01-01", "收盘": 10.0},
+            {"日期": "2024-01-02", "收盘": 11.0},
+            {"日期": "2024-01-03", "收盘": 12.0},
+            {"日期": "2024-01-04", "收盘": 13.0},
+        ]
+    )
+    df_b = pd.DataFrame(
+        [
+            {"日期": "2024-01-01", "收盘": 20.0},
+            {"日期": "2024-01-02", "收盘": 22.0},
+            {"日期": "2024-01-03", "收盘": 24.0},
+            {"日期": "2024-01-04", "收盘": 26.0},
+        ]
+    )
+
+    async def _fetch(symbol, **kwargs):
+        return df_a if symbol == "600519" else df_b
+
+    with patch("xclaw.tools.stock_correlation.fetch_cn_history_dataframe", _fetch):
+        result = await tool.execute(
+            {"symbols": ["600519", "000858"], "market": "CN", "lookback_days": 30},
+            _ctx(),
+        )
+
+    assert not result.is_error
+    assert "相关性分析" in result.content
+    assert "600519 vs 000858" in result.content
+    assert "1.00" in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_correlation_matrix_analysis():
+    tool = StockCorrelationTool()
+    frame = pd.DataFrame(
+        [
+            {"日期": "2024-01-01", "收盘": 10.0},
+            {"日期": "2024-01-02", "收盘": 10.5},
+            {"日期": "2024-01-03", "收盘": 11.0},
+            {"日期": "2024-01-04", "收盘": 11.2},
+            {"日期": "2024-01-05", "收盘": 11.4},
+        ]
+    )
+
+    async def _fetch(symbol, **kwargs):
+        df = frame.copy()
+        if symbol == "AAPL":
+            df["收盘"] = [10.0, 10.5, 11.0, 11.2, 11.4]
+        elif symbol == "MSFT":
+            df["收盘"] = [20.0, 20.8, 21.4, 21.8, 22.2]
+        else:
+            df["收盘"] = [30.0, 30.1, 30.0, 30.4, 30.2]
+        return df
+
+    with patch.object(tool, "_fetch_history", AsyncMock(side_effect=_fetch)):
+        result = await tool.execute(
+            {"symbols": ["AAPL", "MSFT", "GOOGL"], "market": "US", "lookback_days": 30},
+            _ctx(),
+        )
+
+    assert not result.is_error
+    assert "相关矩阵" in result.content
+    assert "AAPL" in result.content
+    assert "MSFT" in result.content
+    assert "GOOGL" in result.content
+
+
+@pytest.mark.asyncio
+async def test_stock_correlation_visualization_exports_heatmap(tmp_path: Path):
+    tool = StockCorrelationTool()
+    frame = pd.DataFrame(
+        [
+            {"日期": "2024-01-01", "收盘": 10.0},
+            {"日期": "2024-01-02", "收盘": 10.5},
+            {"日期": "2024-01-03", "收盘": 11.0},
+            {"日期": "2024-01-04", "收盘": 11.2},
+            {"日期": "2024-01-05", "收盘": 11.4},
+        ]
+    )
+
+    async def _fetch(symbol, **kwargs):
+        df = frame.copy()
+        if symbol == "AAPL":
+            df["收盘"] = [10.0, 10.5, 11.0, 11.2, 11.4]
+        else:
+            df["收盘"] = [9.0, 9.3, 9.8, 10.0, 10.2]
+        return df
+
+    with patch.object(tool, "_fetch_history", AsyncMock(side_effect=_fetch)):
+        result = await tool.execute(
+            {"symbols": ["AAPL", "MSFT"], "market": "US", "lookback_days": 30, "visualize": True},
+            ToolContext(chat_id=7, channel="web", settings=type("S", (), {"report_exports_path": tmp_path})()),
+        )
+
+    assert not result.is_error
+    assert "热力图路径" in result.content
+    exported = [p for p in tmp_path.rglob("*.png")]
+    assert exported
+
+
+# ── earnings_analysis ────────────────────────────────────────────────────────
+
+class _FakeTicker:
+    def __init__(self, info, calendar, earnings_dates):
+        self.info = info
+        self.calendar = calendar
+        self._earnings_dates = earnings_dates
+
+    def get_earnings_dates(self, limit=8):
+        return self._earnings_dates.head(limit)
+
+
+@pytest.mark.asyncio
+async def test_earnings_analysis_preview():
+    tool = EarningsAnalysisTool()
+    earnings_dates = pd.DataFrame(
+        [
+            {"Earnings Date": "2026-05-01", "EPS Estimate": 2.5, "Reported EPS": None, "Surprise(%)": None},
+            {"Earnings Date": "2026-02-01", "EPS Estimate": 2.1, "Reported EPS": 2.3, "Surprise(%)": 9.5},
+            {"Earnings Date": "2025-11-01", "EPS Estimate": 1.9, "Reported EPS": 1.8, "Surprise(%)": -5.3},
+        ]
+    )
+    fake = _FakeTicker(
+        info={
+            "shortName": "Apple Inc.",
+            "currentPrice": 210.0,
+            "recommendationKey": "buy",
+            "numberOfAnalystOpinions": 32,
+            "targetMeanPrice": 225.0,
+        },
+        calendar={"Earnings Date": ["2026-05-01", "2026-05-02"]},
+        earnings_dates=earnings_dates,
+    )
+
+    with patch("yfinance.Ticker", return_value=fake):
+        result = await tool.execute({"symbol": "AAPL", "market": "US", "mode": "preview"}, _ctx())
+
+    assert not result.is_error
+    assert "财报前瞻" in result.content
+    assert "Apple Inc." in result.content
+    assert "2026-05-01" in result.content
+    assert "EPS 一致预期" in result.content
+
+
+@pytest.mark.asyncio
+async def test_earnings_analysis_estimate():
+    tool = EarningsAnalysisTool()
+    earnings_dates = pd.DataFrame(
+        [
+            {"Earnings Date": "2026-05-01", "EPS Estimate": 2.5, "Reported EPS": None, "Surprise(%)": None},
+            {"Earnings Date": "2026-02-01", "EPS Estimate": 2.1, "Reported EPS": 2.3, "Surprise(%)": 9.5},
+        ]
+    )
+    fake = _FakeTicker(
+        info={
+            "shortName": "Tencent Holdings",
+            "currentPrice": 520.0,
+            "recommendationKey": "buy",
+            "numberOfAnalystOpinions": 28,
+            "targetMeanPrice": 610.0,
+            "forwardEps": 24.5,
+            "trailingEps": 21.1,
+            "earningsGrowth": 0.16,
+            "revenueGrowth": 0.11,
+        },
+        calendar={"Earnings Date": ["2026-05-15"]},
+        earnings_dates=earnings_dates,
+    )
+
+    with patch("yfinance.Ticker", return_value=fake):
+        result = await tool.execute({"symbol": "00700", "market": "HK", "mode": "estimate"}, _ctx())
+
+    assert not result.is_error
+    assert "预期分析" in result.content
+    assert "Tencent Holdings" in result.content
+    assert "24.5" in result.content
+    assert "16.00%" in result.content
+
+
+@pytest.mark.asyncio
+async def test_earnings_analysis_recap_includes_beat_rate_and_price_reaction():
+    tool = EarningsAnalysisTool()
+    earnings_dates = pd.DataFrame(
+        [
+            {"Earnings Date": "2026-04-01", "EPS Estimate": 2.5, "Reported EPS": 2.8, "Surprise(%)": 12.0},
+            {"Earnings Date": "2026-01-01", "EPS Estimate": 2.1, "Reported EPS": 2.3, "Surprise(%)": 9.5},
+            {"Earnings Date": "2025-10-01", "EPS Estimate": 1.9, "Reported EPS": 1.8, "Surprise(%)": -5.3},
+        ]
+    )
+    fake = _FakeTicker(
+        info={
+            "shortName": "Apple Inc.",
+            "currentPrice": 210.0,
+            "regularMarketPreviousClose": 204.0,
+            "recommendationKey": "buy",
+        },
+        calendar={"Earnings Date": ["2026-07-01"]},
+        earnings_dates=earnings_dates,
+    )
+
+    with patch("yfinance.Ticker", return_value=fake):
+        result = await tool.execute({"symbol": "AAPL", "market": "US", "mode": "recap"}, _ctx())
+
+    assert not result.is_error
+    assert "财报回顾" in result.content
+    assert "Beat 率" in result.content
+    assert "价格反应" in result.content
+
+
+# ── etf_premium_analysis ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_etf_premium_analysis_uses_nav_gap():
+    from xclaw.tools.etf_premium_analysis import ETFPremiumAnalysisTool
+
+    tool = ETFPremiumAnalysisTool()
+    fake = _FakeTicker(
+        info={
+            "shortName": "QQQ ETF",
+            "currentPrice": 500.0,
+            "navPrice": 497.5,
+            "regularMarketVolume": 1234567,
+        },
+        calendar={},
+        earnings_dates=pd.DataFrame(),
+    )
+
+    with patch("yfinance.Ticker", return_value=fake):
+        result = await tool.execute({"symbol": "QQQ", "market": "US"}, _ctx())
+
+    assert not result.is_error
+    assert "ETF 溢价/折价分析" in result.content
+    assert "0.50%" in result.content
+
+
+# ── stock_liquidity ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stock_liquidity_analyzes_average_value_and_amihud():
+    from xclaw.tools.stock_liquidity import StockLiquidityTool
+
+    tool = StockLiquidityTool()
+    df = pd.DataFrame(
+        [
+            {"日期": "2024-01-01", "开盘": 10.0, "收盘": 10.1, "最高": 10.2, "最低": 9.9, "成交量": 1000000},
+            {"日期": "2024-01-02", "开盘": 10.1, "收盘": 10.3, "最高": 10.35, "最低": 10.0, "成交量": 1100000},
+            {"日期": "2024-01-03", "开盘": 10.3, "收盘": 10.25, "最高": 10.4, "最低": 10.2, "成交量": 900000},
+            {"日期": "2024-01-04", "开盘": 10.25, "收盘": 10.5, "最高": 10.55, "最低": 10.2, "成交量": 1300000},
+        ]
+    )
+    df.attrs["source"] = "baostock"
+
+    with patch("xclaw.tools.stock_liquidity.fetch_cn_history_dataframe", AsyncMock(return_value=df)):
+        result = await tool.execute({"symbol": "600519", "market": "CN", "lookback_days": 30}, _ctx())
+
+    assert not result.is_error
+    assert "流动性分析" in result.content
+    assert "日均成交额" in result.content
 
 
 # ── stock_history ─────────────────────────────────────────────────────────────

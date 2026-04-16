@@ -36,7 +36,7 @@ class StrategyScanTool(Tool):
                 },
                 "output_mode": {
                     "type": "string",
-                    "enum": ["summary", "full"],
+                    "enum": ["summary", "full", "decision_card"],
                     "default": "summary",
                 },
             },
@@ -83,6 +83,30 @@ class StrategyScanTool(Tool):
     ) -> str:
         lines = [f"=== {symbol} 策略扫描 ({market}) ==="]
         lines.append(f"高价值策略数: {len(valuable)} / {len(results)}")
+
+        if output_mode == "decision_card":
+            top = sorted(results, key=lambda item: int(item.get("bias_score", 0)), reverse=True)[0]
+            if valuable:
+                overall = "偏多，可分批关注" if any(
+                    item.get("signal_status") == "triggered" for item in valuable
+                ) else "偏观察，可等待触发确认"
+            else:
+                overall = "暂不出手，继续观察"
+            lines = [f"## {symbol} 策略决策卡", f"市场: {market}", f"综合结论: {overall}"]
+            lines.append(
+                f"优先策略: {top['strategy_id']} | 状态: {top['signal_status']} | 分数: {top['bias_score']}"
+            )
+            lines.append(f"参考买入区: {top['buy_zone']}")
+            lines.append(f"参考止损: {top['stop_loss']}")
+            lines.append(f"第一目标位: {top['target_1']}")
+            lines.append(f"触发条件: {top['trigger_condition']}")
+            if top.get("risk_notes"):
+                lines.append(f"风险提示: {top['risk_notes']}")
+            if valuable:
+                lines.append(
+                    "高价值策略: " + ", ".join(item["strategy_id"] for item in valuable[:4])
+                )
+            return "\n".join(lines)
 
         rows = valuable if output_mode == "summary" and valuable else results
         for result in rows:
