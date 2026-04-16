@@ -34,7 +34,7 @@
 
 | 分类 | 特性 |
 |------|------|
-| 🤖 **AI 引擎** | 支持 Anthropic Claude、OpenAI GPT、DeepSeek、Ollama（本地模型）|
+| 🤖 **AI 引擎** | 支持 Anthropic Claude、OpenAI GPT、OpenAI Codex OAuth（ChatGPT 登录）、DeepSeek、Ollama（本地模型）|
 | 💬 **多渠道** | 飞书、企业微信、钉钉、QQ 群、微信公众号/小程序、Web REST + SSE |
 | 📈 **投资助手** | A股/美股/港股行情、历史K线、技术指标（MA/MACD/RSI/KDJ/BOLL）、财务数据、市场概览、个股新闻、**策略买卖点扫描**、**自选股日报**；同时支持国内商品期货的只读查询（行情、历史K线、技术指标、缺口分析）；A股数据源已形成分层与 failover 重构方案 |
 | 📊 **策略回测** | 均线交叉（SMA Cross）/ RSI 策略回测，输出总收益、最大回撤、Sharpe 比率、胜率 |
@@ -131,7 +131,7 @@ xclaw setup
 cp xclaw.config.example.yaml xclaw.config.yaml
 # 用编辑器打开 xclaw.config.yaml，至少填写：
 #   api_key: "sk-..."
-#   llm_provider: "anthropic"   # 或 openai / deepseek / ollama
+#   llm_provider: "anthropic"   # 或 openai / openai-codex / deepseek / ollama
 ```
 
 **方式 C：纯环境变量（无配置文件）**
@@ -180,9 +180,9 @@ curl -s -X POST http://127.0.0.1:8080/api/chat \
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm_provider` | `anthropic` | `anthropic` / `openai` / `deepseek` / `ollama` |
-| `api_key` | `""` | LLM API Key（建议通过环境变量设置） |
-| `model` | `claude-opus-4-5` | 模型名称，可替换为 `gpt-4o`、`deepseek-chat`、`llama3` 等 |
+| `llm_provider` | `anthropic` | `anthropic` / `openai` / `openai-codex` / `deepseek` / `ollama` |
+| `api_key` | `""` | LLM API Key（`openai-codex` 可留空，改走 OAuth） |
+| `model` | `claude-opus-4-5` | 模型名称，可替换为 `gpt-4o`、`gpt-5.4`、`deepseek-chat`、`llama3` 等 |
 | `max_tokens` | `4096` | 单次 LLM 回复最大 token 数 |
 | `max_tool_iterations` | `10` | Agent 单轮工具调用最大轮次 |
 
@@ -195,6 +195,29 @@ curl -s -X POST http://127.0.0.1:8080/api/chat \
 | `web_port` | `8080` | 服务端口 |
 | `web_auth_token` | `""` | Bearer Token 鉴权，留空则不验证（生产环境**务必**设置） |
 | `rate_limit_per_minute` | `20` | 每 IP 每分钟最大请求数 |
+
+### ChatGPT / Codex OAuth 登录
+
+当 `llm_provider: openai-codex` 时，XClaw 会改用 OpenAI Codex OAuth：
+
+- `api_key` 可以留空
+- 默认请求面是 `https://chatgpt.com/backend-api`
+- 登录入口在管理页 `/admin`
+- 登录成功后 token 会保存在 `data_dir/auth_profiles.json`
+- 支持两种完成方式：
+  - 本机自动回调：`http://localhost:1455/auth/callback`
+  - 手动粘贴 redirect URL / authorization code
+
+推荐配置示例：
+
+```yaml
+llm_provider: "openai-codex"
+model: "gpt-5.4"
+api_key: ""
+base_url: ""
+```
+
+如果服务和浏览器不在同一台机器，先在 `/admin` 点击“开始登录”，然后在本机浏览器完成授权，再把回调 URL 粘贴回管理页即可。
 
 ### 会话管理
 

@@ -14,6 +14,7 @@ from xclaw.config import Settings
 from xclaw.db import Database
 from xclaw.llm import create_provider
 from xclaw.memory import FileMemory, StructuredMemory
+from xclaw.oauth import AuthProfileStore, OpenAICodexOAuthManager
 from xclaw.skills import build_skill_registry
 from xclaw.tools import ToolRegistry
 from xclaw.tools.sub_agent import SubAgentTool
@@ -63,6 +64,13 @@ async def run(settings: Settings) -> None:
     await db.connect()
     logger.info(f"Database connected: {settings.db_path}")
 
+    oauth_manager = None
+    if settings.llm_provider == "openai-codex":
+        oauth_manager = OpenAICodexOAuthManager(
+            store=AuthProfileStore(settings.auth_profiles_path),
+            base_url=settings.base_url or "https://chatgpt.com/backend-api",
+        )
+
     # LLM Provider
     llm = create_provider(
         settings.llm_provider,
@@ -72,6 +80,7 @@ async def run(settings: Settings) -> None:
         temperature=settings.temperature,
         timeout=settings.timeout,
         thinking=settings.thinking,
+        oauth_manager=oauth_manager,
     )
 
     # Memory
@@ -293,6 +302,7 @@ async def run(settings: Settings) -> None:
             settings=settings,
             multi_user_mode=settings.multi_user_mode,
             tool_registry=tools,
+            oauth_manager=oauth_manager,
         )
         # Register webhook adapters using isinstance checks for safety
         if settings.feishu_enabled:
@@ -330,6 +340,8 @@ async def run(settings: Settings) -> None:
     if wechat_multi_tenant is not None:
         await wechat_multi_tenant.stop()
     await db.close()
+    if oauth_manager is not None:
+        await oauth_manager.close()
     for adapter in adapters:
         await adapter.stop()
         if hasattr(adapter, "close"):

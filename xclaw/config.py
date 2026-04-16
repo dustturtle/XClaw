@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"anthropic", "openai", "deepseek", "ollama"}
+        allowed = {"anthropic", "openai", "deepseek", "ollama", "openai-codex"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}")
         return v
@@ -200,6 +200,10 @@ class Settings(BaseSettings):
     @property
     def report_exports_path(self) -> Path:
         return self.data_path / "report_exports"
+
+    @property
+    def auth_profiles_path(self) -> Path:
+        return self.data_path / "auth_profiles.json"
 
     @property
     def wechat_account_path(self) -> Path:

@@ -16,6 +16,7 @@ from xclaw.channels.wecom import WeComAdapter
 from xclaw.channels.dingtalk import DingTalkAdapter
 from xclaw.channels.qq import QQAdapter
 from xclaw.channels.web import create_web_app
+from xclaw.config import Settings
 
 
 # ── Feishu adapter ────────────────────────────────────────────────────────────
@@ -103,6 +104,86 @@ async def test_feishu_start_stop():
     await adapter.start()  # Should not raise
     with patch.object(adapter._client, "aclose", new=AsyncMock()):
         await adapter.stop()
+
+
+class _FakeOAuthManager:
+    def __init__(self) -> None:
+        self.start_login = AsyncMock(
+            return_value={
+                "login_id": "login-1",
+                "authorize_url": "https://auth.openai.com/oauth/authorize?state=abc",
+                "expires_at": "2026-04-16T12:00:00Z",
+                "mode": "manual",
+            }
+        )
+        self.get_login_status = AsyncMock(
+            return_value={
+                "login_id": "login-1",
+                "status": "completed",
+                "authenticated": True,
+                "email": "alice@example.com",
+            }
+        )
+        self.complete_login = AsyncMock(
+            return_value={
+                "authenticated": True,
+                "provider": "openai-codex",
+                "email": "alice@example.com",
+                "display_name": "Alice",
+            }
+        )
+        self.get_session_payload = AsyncMock(
+            return_value={
+                "authenticated": True,
+                "provider": "openai-codex",
+                "email": "alice@example.com",
+                "display_name": "Alice",
+            }
+        )
+        self.logout = AsyncMock(return_value=None)
+
+
+def test_admin_page_mentions_openai_codex_oauth_controls():
+    app = create_web_app(
+        message_handler=AsyncMock(return_value="ok"),
+        settings=Settings(llm_provider="openai-codex"),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/admin")
+
+    assert resp.status_code == 200
+    assert "ChatGPT / Codex 登录" in resp.text
+    assert "/api/llm/oauth/openai-codex/start" in resp.text
+
+
+def test_openai_codex_oauth_web_api_flow():
+    oauth_manager = _FakeOAuthManager()
+    app = create_web_app(
+        message_handler=AsyncMock(return_value="ok"),
+        settings=Settings(llm_provider="openai-codex"),
+        oauth_manager=oauth_manager,
+    )
+    client = TestClient(app)
+
+    start = client.post("/api/llm/oauth/openai-codex/start")
+    status = client.get("/api/llm/oauth/openai-codex/status/login-1")
+    complete = client.post(
+        "/api/llm/oauth/openai-codex/complete",
+        json={"login_id": "login-1", "redirect_url_or_code": "http://localhost:1455/auth/callback?code=1&state=abc"},
+    )
+    session = client.get("/api/llm/provider/session")
+    logout = client.post("/api/llm/oauth/openai-codex/logout")
+
+    assert start.status_code == 200
+    assert start.json()["login_id"] == "login-1"
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+    assert complete.status_code == 200
+    assert complete.json()["authenticated"] is True
+    assert session.status_code == 200
+    assert session.json()["provider"] == "openai-codex"
+    assert logout.status_code == 200
 
 
 # ── WeCom adapter ─────────────────────────────────────────────────────────────

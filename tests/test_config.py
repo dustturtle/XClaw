@@ -127,6 +127,11 @@ def test_invalid_provider():
         Settings(llm_provider="unsupported_provider")
 
 
+def test_openai_codex_provider_is_allowed():
+    s = Settings(llm_provider="openai-codex")
+    assert s.llm_provider == "openai-codex"
+
+
 def test_invalid_market():
     """An invalid stock_market_default should raise a ValidationError."""
     from pydantic import ValidationError
@@ -142,6 +147,7 @@ def test_data_paths():
     assert s.db_path == Path("/tmp/xclaw_test/xclaw.db")
     assert s.logs_path == Path("/tmp/xclaw_test/logs")
     assert s.groups_path == Path("/tmp/xclaw_test/groups")
+    assert s.auth_profiles_path == Path("/tmp/xclaw_test/auth_profiles.json")
     assert s.wechat_account_path == Path("/tmp/xclaw_test/wechat_account.json")
     assert s.wechat_state_path == Path("/tmp/xclaw_test/wechat_state.json")
 

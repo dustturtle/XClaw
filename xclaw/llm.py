@@ -21,6 +21,7 @@ from xclaw.llm_types import (
     ToolUseBlock,
     UsageStats,
 )
+from xclaw.oauth import OAuthNotAuthenticatedError
 
 
 class LLMProvider(ABC):
@@ -374,6 +375,186 @@ class OpenAICompatibleProvider(LLMProvider):
         await self._client.aclose()
 
 
+class OpenAICodexProvider(LLMProvider):
+    """Provider for ChatGPT/Codex OAuth-backed requests."""
+
+    def __init__(
+        self,
+        *,
+        credential_manager: Any,
+        model: str = "gpt-5.4",
+        base_url: str = "https://chatgpt.com/backend-api",
+        timeout: float = 120.0,
+    ) -> None:
+        self.credential_manager = credential_manager
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=timeout)
+
+    def _serialize_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            if isinstance(msg.content, str):
+                result.append(
+                    {
+                        "type": "message",
+                        "role": msg.role,
+                        "content": [{"type": "input_text", "text": msg.content}],
+                    }
+                )
+                continue
+
+            text_parts: list[str] = []
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+                elif isinstance(block, ToolUseBlock):
+                    result.append(
+                        {
+                            "type": "function_call",
+                            "call_id": block.id,
+                            "name": block.name,
+                            "arguments": json.dumps(block.input),
+                        }
+                    )
+                else:
+                    result.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": block.tool_use_id,
+                            "output": block.content,
+                        }
+                    )
+            if text_parts:
+                result.append(
+                    {
+                        "type": "message",
+                        "role": msg.role,
+                        "content": [{"type": "input_text", "text": "\n".join(text_parts)}],
+                    }
+                )
+        return result
+
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+        system: str | None,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": self._serialize_messages(messages),
+            "max_output_tokens": max_tokens,
+        }
+        if system:
+            payload["instructions"] = system
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                }
+                for t in tools
+            ]
+            payload["tool_choice"] = "auto"
+        return payload
+
+    def _parse_response(self, data: dict[str, Any]) -> LLMResponse:
+        content: list[ContentBlock] = []
+        for item in data.get("output", []):
+            item_type = item.get("type")
+            if item_type == "message":
+                for part in item.get("content", []):
+                    if part.get("type") in {"output_text", "text"} and part.get("text"):
+                        content.append(TextBlock(text=part["text"]))
+            elif item_type == "function_call":
+                try:
+                    args = json.loads(item.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                content.append(
+                    ToolUseBlock(
+                        id=item.get("call_id") or item.get("id") or "",
+                        name=item.get("name", ""),
+                        input=args,
+                    )
+                )
+
+        stop_reason = StopReason.end_turn
+        if any(isinstance(block, ToolUseBlock) for block in content):
+            stop_reason = StopReason.tool_use
+
+        incomplete = data.get("incomplete_details") or {}
+        if incomplete.get("reason") == "max_output_tokens":
+            stop_reason = StopReason.max_tokens
+
+        usage_data = data.get("usage", {})
+        return LLMResponse(
+            stop_reason=stop_reason,
+            content=content,
+            usage=UsageStats(
+                input_tokens=usage_data.get("input_tokens", 0),
+                output_tokens=usage_data.get("output_tokens", 0),
+            ),
+            model=data.get("model", self.model),
+        )
+
+    async def _post_with_auth(self, payload: dict[str, Any]) -> dict[str, Any]:
+        token = await self.credential_manager.get_access_token()
+        response = await self._client.post(
+            f"{self.base_url}/responses",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        if response.status_code == 401:
+            token = await self.credential_manager.get_access_token(force_refresh=True)
+            response = await self._client.post(
+                f"{self.base_url}/responses",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        system: str | None = None,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        if self.credential_manager is None:
+            raise OAuthNotAuthenticatedError("OpenAI Codex OAuth manager is not configured.")
+        payload = self._build_payload(messages, tools, system, max_tokens)
+        data = await self._post_with_auth(payload)
+        return self._parse_response(data)
+
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        system: str | None = None,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[LLMEvent]:
+        response = await self.chat(messages, tools, system, max_tokens)
+        for block in response.content:
+            if isinstance(block, TextBlock):
+                yield TextDeltaEvent(text=block.text)
+        yield DoneEvent(response=response)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def create_provider(
@@ -384,10 +565,18 @@ def create_provider(
     temperature: float | None = None,
     timeout: float = 120.0,
     thinking: bool | None = None,
+    oauth_manager: Any | None = None,
 ) -> LLMProvider:
     """Factory that returns the correct LLMProvider based on config."""
     if provider == "anthropic":
         return AnthropicProvider(api_key=api_key, model=model, timeout=timeout)
+    if provider == "openai-codex":
+        return OpenAICodexProvider(
+            credential_manager=oauth_manager,
+            model=model,
+            base_url=(base_url or "https://chatgpt.com/backend-api"),
+            timeout=timeout,
+        )
     # OpenAI-compatible providers
     urls = {
         "openai": "https://api.openai.com/v1",

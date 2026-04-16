@@ -30,6 +30,7 @@ from xclaw.channels.wechat_multi_tenant import (
 )
 from xclaw.investment.report_service import InvestmentReportService
 from xclaw.investment.report_export_service import ReportExportService
+from xclaw.oauth import OAuthLoginNotFoundError
 
 # Rate limiting (slowapi)
 try:
@@ -86,6 +87,11 @@ class InvestmentDeliverRequest(BaseModel):
     chat_id: str
     channel: str = "wechat"
     mode: str = "image+pdf"
+
+
+class OAuthCompleteRequest(BaseModel):
+    login_id: str
+    redirect_url_or_code: str
 
 
 def _build_chat_page_html(
@@ -596,6 +602,12 @@ def _build_admin_page_html() -> str:
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
     .card { background: #fff; border: 1px solid #eadfce; border-radius: 16px; padding: 16px; }
     code { background: #f5eee3; padding: 2px 6px; border-radius: 8px; }
+    textarea, input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #decfb7; margin-top: 8px; font: inherit; }
+    button { border: 0; border-radius: 999px; background: #bf5a36; color: #fff; padding: 10px 16px; cursor: pointer; margin-top: 8px; margin-right: 8px; }
+    button.secondary { background: #6e5a42; }
+    .status { margin-top: 10px; color: #6e5a42; white-space: pre-wrap; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .link { display: inline-block; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -607,8 +619,138 @@ def _build_admin_page_html() -> str:
       <div class="card"><strong>手动运行</strong><p><code>/api/investment/reports/run</code></p></div>
       <div class="card"><strong>自选股管理</strong><p><code>/api/investment/watchlist</code></p></div>
       <div class="card"><strong>日报任务</strong><p><code>/api/investment/tasks</code></p></div>
+      <div class="card">
+        <strong>ChatGPT / Codex 登录</strong>
+        <p><code>/api/llm/oauth/openai-codex/start</code></p>
+        <div class="actions">
+          <button id="oauth-start">开始登录</button>
+          <button id="oauth-refresh" class="secondary">刷新状态</button>
+          <button id="oauth-logout" class="secondary">退出登录</button>
+        </div>
+        <a id="oauth-link" class="link" href="#" target="_blank" rel="noreferrer" hidden>打开授权页</a>
+        <label for="oauth-manual">手动粘贴 redirect URL 或授权码</label>
+        <textarea id="oauth-manual" rows="4" placeholder="http://localhost:1455/auth/callback?code=...&state=..."></textarea>
+        <button id="oauth-complete">提交回调</button>
+        <div id="oauth-status" class="status">正在加载 OAuth 状态…</div>
+      </div>
     </div>
   </div>
+  <script>
+    let currentLoginId = "";
+    const statusEl = document.getElementById("oauth-status");
+    const linkEl = document.getElementById("oauth-link");
+    const inputEl = document.getElementById("oauth-manual");
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function renderSession(payload) {
+      if (!payload || !payload.provider) {
+        setStatus("当前 provider 未启用 OAuth。");
+        return;
+      }
+      if (!payload.authenticated) {
+        setStatus(`Provider: ${payload.provider}\\n状态: 未登录`);
+        return;
+      }
+      setStatus(
+        [
+          `Provider: ${payload.provider}`,
+          `状态: 已登录`,
+          `账号: ${payload.email || "-"}`,
+          `显示名: ${payload.display_name || "-"}`,
+          `到期时间: ${payload.expires_at || "-"}`,
+        ].join("\\n")
+      );
+    }
+
+    async function loadSession() {
+      const response = await fetch("/api/llm/provider/session");
+      const data = await response.json();
+      renderSession(data);
+    }
+
+    async function startLogin() {
+      const response = await fetch("/api/llm/oauth/openai-codex/start", { method: "POST" });
+      const data = await response.json();
+      currentLoginId = data.login_id || "";
+      if (data.authorize_url) {
+        linkEl.href = data.authorize_url;
+        linkEl.hidden = false;
+      }
+      setStatus(
+        [
+          `登录会话: ${data.login_id || "-"}`,
+          `模式: ${data.mode || "-"}`,
+          `到期时间: ${data.expires_at || "-"}`,
+          "请打开授权页完成登录；如果没有自动完成，请粘贴回调 URL。"
+        ].join("\\n")
+      );
+    }
+
+    async function refreshLogin() {
+      if (currentLoginId) {
+        const response = await fetch(`/api/llm/oauth/openai-codex/status/${currentLoginId}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === "completed") {
+            await loadSession();
+            return;
+          }
+          setStatus(
+            [
+              `登录会话: ${data.login_id || "-"}`,
+              `状态: ${data.status || "-"}`,
+              `模式: ${data.mode || "-"}`,
+              `错误: ${data.error || "-"}`,
+            ].join("\\n")
+          );
+          return;
+        }
+      }
+      await loadSession();
+    }
+
+    async function completeLogin() {
+      if (!currentLoginId) {
+        setStatus("请先点击“开始登录”。");
+        return;
+      }
+      const response = await fetch("/api/llm/oauth/openai-codex/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          login_id: currentLoginId,
+          redirect_url_or_code: inputEl.value.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setStatus(data.detail || "登录失败");
+        return;
+      }
+      renderSession(data);
+    }
+
+    async function logout() {
+      const response = await fetch("/api/llm/oauth/openai-codex/logout", { method: "POST" });
+      if (!response.ok) {
+        setStatus("退出登录失败。");
+        return;
+      }
+      currentLoginId = "";
+      linkEl.hidden = true;
+      inputEl.value = "";
+      await loadSession();
+    }
+
+    document.getElementById("oauth-start").addEventListener("click", startLogin);
+    document.getElementById("oauth-refresh").addEventListener("click", refreshLogin);
+    document.getElementById("oauth-complete").addEventListener("click", completeLogin);
+    document.getElementById("oauth-logout").addEventListener("click", logout);
+    loadSession();
+  </script>
 </body>
 </html>
 """
@@ -635,6 +777,7 @@ def create_web_app(
     settings: Any = None,
     multi_user_mode: bool = False,
     tool_registry: Any = None,
+    oauth_manager: Any = None,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -780,12 +923,19 @@ def create_web_app(
 
     # ── DingTalk webhook ──────────────────────────────────────────────────────
     _dingtalk_adapter: Any = None
+    _oauth_manager: Any = oauth_manager
 
     def set_dingtalk_adapter(adapter: Any) -> None:
         nonlocal _dingtalk_adapter
         _dingtalk_adapter = adapter
 
     app.state.set_dingtalk_adapter = set_dingtalk_adapter
+
+    def set_llm_oauth_manager(manager: Any) -> None:
+        nonlocal _oauth_manager
+        _oauth_manager = manager
+
+    app.state.set_llm_oauth_manager = set_llm_oauth_manager
 
     @app.post("/webhook/dingtalk")
     async def dingtalk_webhook(request: Request) -> JSONResponse:
@@ -855,6 +1005,66 @@ def create_web_app(
             "mcp_server_enabled": getattr(settings, "mcp_server_enabled", False) is True,
         }
         return JSONResponse(safe)
+
+    # ── Provider OAuth APIs ─────────────────────────────────────────────────
+
+    @app.post("/api/llm/oauth/openai-codex/start", dependencies=[Depends(verify_token)])
+    async def start_openai_codex_oauth() -> JSONResponse:
+        if _oauth_manager is None:
+            raise HTTPException(status_code=503, detail="OpenAI Codex OAuth is not configured")
+        try:
+            payload = await _oauth_manager.start_login()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/llm/oauth/openai-codex/status/{login_id}", dependencies=[Depends(verify_token)])
+    async def openai_codex_oauth_status(login_id: str) -> JSONResponse:
+        if _oauth_manager is None:
+            raise HTTPException(status_code=503, detail="OpenAI Codex OAuth is not configured")
+        try:
+            payload = await _oauth_manager.get_login_status(login_id)
+        except OAuthLoginNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.post("/api/llm/oauth/openai-codex/complete", dependencies=[Depends(verify_token)])
+    async def complete_openai_codex_oauth(payload: OAuthCompleteRequest) -> JSONResponse:
+        if _oauth_manager is None:
+            raise HTTPException(status_code=503, detail="OpenAI Codex OAuth is not configured")
+        try:
+            result = await _oauth_manager.complete_login(payload.login_id, payload.redirect_url_or_code)
+        except OAuthLoginNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse(result)
+
+    @app.get("/api/llm/provider/session", dependencies=[Depends(verify_token)])
+    async def get_llm_provider_session() -> JSONResponse:
+        if _oauth_manager is None:
+            provider_name = getattr(settings, "llm_provider", "unknown") if settings else "unknown"
+            return JSONResponse(
+                {
+                    "provider": provider_name,
+                    "authenticated": False,
+                    "email": None,
+                    "display_name": None,
+                    "account_id": None,
+                    "expires_at": None,
+                }
+            )
+        payload = await _oauth_manager.get_session_payload()
+        return JSONResponse(payload)
+
+    @app.post("/api/llm/oauth/openai-codex/logout", dependencies=[Depends(verify_token)])
+    async def logout_openai_codex_oauth() -> JSONResponse:
+        if _oauth_manager is None:
+            raise HTTPException(status_code=503, detail="OpenAI Codex OAuth is not configured")
+        await _oauth_manager.logout()
+        return JSONResponse({"ok": True})
 
     # ── Investment APIs ─────────────────────────────────────────────────────
 
