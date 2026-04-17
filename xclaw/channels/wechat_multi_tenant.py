@@ -26,6 +26,7 @@ from xclaw.channels.wechat import (
     IlinkClient,
     IlinkClientError,
     QRStatusResponse,
+    append_wechat_context_debug_record,
     normalize_polled_message,
     render_qr_svg,
     sanitize_reply_text,
@@ -560,12 +561,14 @@ class MultiTenantBotManager:
         message_handler: Callable[[str, str], Coroutine[Any, Any, str]],
         poll_timeout_ms: int,
         max_reply_chars: int,
+        debug_log_path: Path | None = None,
     ) -> None:
         self.db = db
         self.ilink_client = ilink_client
         self.message_handler = message_handler
         self.poll_timeout_ms = poll_timeout_ms
         self.max_reply_chars = max_reply_chars
+        self.debug_log_path = debug_log_path
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
 
@@ -807,6 +810,16 @@ class MultiTenantBotManager:
         )
 
         if message.context_token:
+            append_wechat_context_debug_record(
+                self.debug_log_path,
+                scope="multi",
+                sender_id=message.sender_id,
+                message_id=message.message_id,
+                context_token=message.context_token,
+                previous_context_token=runtime.context_token,
+                member_id=member.member_id,
+                tenant_id=member.tenant_id,
+            )
             await self.db.update_runtime_state(
                 member.member_id,
                 tenant_id=member.tenant_id,
@@ -919,12 +932,13 @@ class MultiTenantBotManager:
             raise RuntimeError(f"Missing context_token for member_id={member_id}")
 
         clean_text = sanitize_reply_text(text, max_chars=self.max_reply_chars)
-        await self.ilink_client.send_text_message(
-            credential.base_url,
-            credential.bot_token,
-            member.ilink_user_id,
-            clean_text,
-            context_token,
+        await self._send_text_message_with_retry(
+            tenant_id=tenant_id,
+            member_id=member_id,
+            credential=credential,
+            ilink_user_id=member.ilink_user_id,
+            text=clean_text,
+            context_token=context_token,
         )
         await self.db.update_runtime_state(
             member_id,
@@ -934,7 +948,7 @@ class MultiTenantBotManager:
 
     async def send_image_response(self, member_chat_id: str, image_path: Path) -> None:
         tenant_id, member_id = parse_member_chat_id(member_chat_id)
-        member, credential, context_token = await self._resolve_delivery_target(
+        member, credential, _context_token = await self._resolve_delivery_target(
             member_chat_id=member_chat_id,
             tenant_id=tenant_id,
             member_id=member_id,
@@ -946,7 +960,7 @@ class MultiTenantBotManager:
             member.ilink_user_id,
             image_path.name,
             payload,
-            context_token or None,
+            None,
         )
         await self.db.update_runtime_state(
             member_id,
@@ -956,7 +970,7 @@ class MultiTenantBotManager:
 
     async def send_file_response(self, member_chat_id: str, file_path: Path) -> None:
         tenant_id, member_id = parse_member_chat_id(member_chat_id)
-        member, credential, context_token = await self._resolve_delivery_target(
+        member, credential, _context_token = await self._resolve_delivery_target(
             member_chat_id=member_chat_id,
             tenant_id=tenant_id,
             member_id=member_id,
@@ -968,13 +982,59 @@ class MultiTenantBotManager:
             member.ilink_user_id,
             file_path.name,
             payload,
-            context_token or None,
+            None,
         )
         await self.db.update_runtime_state(
             member_id,
             tenant_id=tenant_id,
             last_error=None,
         )
+
+    async def _send_text_message_with_retry(
+        self,
+        *,
+        tenant_id: str,
+        member_id: str,
+        credential: ChannelCredentialRecord,
+        ilink_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> None:
+        initial_context_token = context_token.strip()
+        try:
+            await self.ilink_client.send_text_message(
+                credential.base_url,
+                credential.bot_token,
+                ilink_user_id,
+                text,
+                initial_context_token,
+            )
+            return
+        except IlinkClientError as exc:
+            if not self._is_session_timeout_error(exc):
+                raise
+
+        latest_runtime = MemberRuntimeStateRecord.model_validate(
+            await self.db.get_runtime_state(member_id, tenant_id)
+        )
+        refreshed_context_token = latest_runtime.context_token.strip()
+        if not refreshed_context_token or refreshed_context_token == initial_context_token:
+            raise IlinkClientError(
+                "sendmessage failed: errcode=-14 errmsg=session timeout"
+            )
+
+        await self.ilink_client.send_text_message(
+            credential.base_url,
+            credential.bot_token,
+            ilink_user_id,
+            text,
+            refreshed_context_token,
+        )
+
+    @staticmethod
+    def _is_session_timeout_error(exc: IlinkClientError) -> bool:
+        text = str(exc).lower()
+        return "session timeout" in text or "errcode=-14" in text
 
     async def _resolve_delivery_target(
         self,
@@ -1016,6 +1076,7 @@ class WeChatMultiTenantService:
         max_reply_chars: int,
         message_handler: Callable[[str, str], Coroutine[Any, Any, str]],
         ilink_client: IlinkClient | None = None,
+        debug_log_path: Path | None = None,
     ) -> None:
         self.ilink_client = ilink_client or HttpIlinkClient()
         self.manager = MultiTenantBotManager(
@@ -1024,6 +1085,7 @@ class WeChatMultiTenantService:
             message_handler=message_handler,
             poll_timeout_ms=poll_timeout_ms,
             max_reply_chars=max_reply_chars,
+            debug_log_path=debug_log_path,
         )
         self.invites = InviteService(
             base_url=base_url,

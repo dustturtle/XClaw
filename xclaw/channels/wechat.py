@@ -150,6 +150,42 @@ class WechatBotStatusPayload(BaseModel):
     active_sessions: int = 0
 
 
+_CONTEXT_DEBUG_LOCK = threading.Lock()
+
+
+def append_wechat_context_debug_record(
+    log_path: Path | None,
+    *,
+    scope: str,
+    sender_id: str,
+    message_id: str,
+    context_token: str,
+    previous_context_token: str = "",
+    member_id: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """Append a JSONL debug record for inbound context_token changes."""
+    if log_path is None:
+        return
+    record = {
+        "ts": utc_now().isoformat(),
+        "scope": scope,
+        "sender_id": sender_id,
+        "message_id": message_id,
+        "context_token": context_token,
+        "previous_context_token": previous_context_token,
+        "changed": previous_context_token != context_token,
+    }
+    if member_id:
+        record["member_id"] = member_id
+    if tenant_id:
+        record["tenant_id"] = tenant_id
+    with _CONTEXT_DEBUG_LOCK:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 class IlinkGetConfigResponse(BaseModel):
     ret: int = 0
     typing_ticket: str = ""
@@ -1044,6 +1080,7 @@ class WeChatAdapter(ChannelAdapter):
         base_url: str,
         account_path: Path,
         state_path: Path,
+        debug_log_path: Path | None = None,
         qr_total_timeout_seconds: int = 480,
         qr_poll_interval_seconds: int = 1,
         poll_timeout_ms: int = 25_000,
@@ -1066,6 +1103,7 @@ class WeChatAdapter(ChannelAdapter):
         self._account_store = account_store or WechatAccountStore(account_path)
         self._state_store = state_store or WechatStateStore(state_path)
         self._attempt_store = attempt_store or LoginAttemptStore()
+        self._debug_log_path = debug_log_path
         self._ilink_client = ilink_client or HttpIlinkClient(
             poll_timeout_seconds=qr_poll_timeout_seconds,
         )
@@ -1350,6 +1388,15 @@ class WeChatAdapter(ChannelAdapter):
 
         self._remember_message_id(state, message.message_id)
         if message.context_token:
+            previous_context_token = state.context_tokens.get(message.sender_id, "")
+            append_wechat_context_debug_record(
+                self._debug_log_path,
+                scope="single",
+                sender_id=message.sender_id,
+                message_id=message.message_id,
+                context_token=message.context_token,
+                previous_context_token=previous_context_token,
+            )
             state.context_tokens[message.sender_id] = message.context_token
 
         reply_context_token = message.context_token or state.context_tokens.get(message.sender_id, "")

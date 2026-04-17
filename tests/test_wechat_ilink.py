@@ -296,6 +296,38 @@ async def test_wechat_poll_once_processes_private_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wechat_poll_once_records_context_token_debug_log(tmp_path: Path) -> None:
+    debug_log = tmp_path / "wechat_context_debug.jsonl"
+    handler = AsyncMock(return_value="ok")
+    adapter, _client = _make_adapter(
+        tmp_path,
+        handler=handler,
+        updates=[
+            IlinkGetUpdatesResponse(
+                ret=0,
+                get_updates_buf="buf-2",
+                msgs=[_make_text_message("你好", context_token="ctx-new", message_id="m-1")],
+            )
+        ],
+    )
+    adapter._debug_log_path = debug_log
+    _save_account(adapter)
+    state = adapter._state_store.load()
+    state.context_tokens["alice@im.wechat"] = "ctx-old"
+    adapter._state_store.save(state)
+
+    await adapter.poll_once()
+
+    lines = debug_log.read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[-1])
+    assert payload["scope"] == "single"
+    assert payload["sender_id"] == "alice@im.wechat"
+    assert payload["previous_context_token"] == "ctx-old"
+    assert payload["context_token"] == "ctx-new"
+    assert payload["changed"] is True
+
+
+@pytest.mark.asyncio
 async def test_wechat_send_image_and_file_response(tmp_path: Path) -> None:
     adapter, client = _make_adapter(tmp_path)
     _save_account(adapter)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -13,6 +14,7 @@ import xclaw.channels.wechat_multi_tenant as wechat_multi_tenant_module
 from xclaw.channels.wechat import (
     IlinkGetConfigResponse,
     IlinkGetUpdatesResponse,
+    IlinkClientError,
     IlinkWireMessage,
     QRCodeResponse,
     QRStatusResponse,
@@ -166,6 +168,7 @@ def _make_service(
     *,
     ilink_client: FakeIlinkClient,
     handler=None,
+    debug_log_path: Path | None = None,
 ) -> WeChatMultiTenantService:
     return WeChatMultiTenantService(
         db=db,
@@ -177,6 +180,7 @@ def _make_service(
         max_reply_chars=1500,
         message_handler=handler or AsyncMock(return_value="ok"),
         ilink_client=ilink_client,
+        debug_log_path=debug_log_path,
     )
 
 
@@ -425,6 +429,65 @@ async def test_multitenant_slow_reply_fetches_typing_and_clears(db: Database) ->
 
 
 @pytest.mark.asyncio
+async def test_multitenant_poll_records_context_token_debug_log(db: Database, tmp_path: Path) -> None:
+    ilink_client = FakeIlinkClient()
+    service = _make_service(
+        db,
+        ilink_client=ilink_client,
+        debug_log_path=tmp_path / "wechat_context_debug.jsonl",
+    )
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-a",
+        qr_content="https://example.com/a.png",
+        ttl_seconds=90,
+    )
+    _, member, credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-1",
+        ilink_bot_id="bot-1",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-old",
+    )
+    ilink_client.updates_by_token["token-1"] = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-1",
+            msgs=[
+                _make_text_message(
+                    "hello",
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-new",
+                    message_id="m-1",
+                )
+            ],
+        )
+    ]
+
+    processed = await service.manager.poll_credential_once(credential["credential_id"])
+
+    assert processed == 1
+    lines = (tmp_path / "wechat_context_debug.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[-1])
+    assert payload["scope"] == "multi"
+    assert payload["member_id"] == member["member_id"]
+    assert payload["previous_context_token"] == "ctx-old"
+    assert payload["context_token"] == "ctx-new"
+    assert payload["changed"] is True
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_multitenant_slow_send_keeps_typing_until_reply_sent(db: Database) -> None:
     ilink_client = FakeIlinkClient()
     handler = AsyncMock(return_value="ok")
@@ -638,9 +701,68 @@ async def test_multitenant_service_send_image_and_file_to_member_chat(
 
     assert ilink_client.sent_images[0]["to_user_id"] == "alice@im.wechat"
     assert ilink_client.sent_images[0]["filename"] == "report.png"
-    assert ilink_client.sent_images[0]["context_token"] == "ctx-send-media"
+    assert ilink_client.sent_images[0]["context_token"] is None
     assert ilink_client.sent_files[0]["to_user_id"] == "alice@im.wechat"
     assert ilink_client.sent_files[0]["filename"] == "report.pdf"
-    assert ilink_client.sent_files[0]["context_token"] == "ctx-send-media"
+    assert ilink_client.sent_files[0]["context_token"] is None
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multitenant_service_send_response_retries_after_context_refresh(
+    db: Database,
+) -> None:
+    ilink_client = FakeIlinkClient()
+    service = _make_service(db, ilink_client=ilink_client)
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-retry",
+        qr_content="https://example.com/retry.png",
+        ttl_seconds=90,
+    )
+    _, member, _credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-send",
+        ilink_bot_id="bot-send",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+    await db.update_runtime_state(
+        member["member_id"],
+        tenant_id=tenant["tenant_id"],
+        context_token="ctx-old",
+    )
+
+    original_send = ilink_client.send_text_message
+    seen_context_tokens: list[str] = []
+
+    async def flaky_send(
+        base_url: str,
+        token: str,
+        to_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> dict[str, int]:
+        seen_context_tokens.append(context_token)
+        if context_token == "ctx-old":
+            await db.update_runtime_state(
+                member["member_id"],
+                tenant_id=tenant["tenant_id"],
+                context_token="ctx-new",
+            )
+            raise IlinkClientError("sendmessage failed: errcode=-14 errmsg=session timeout")
+        return await original_send(base_url, token, to_user_id, text, context_token)
+
+    ilink_client.send_text_message = flaky_send  # type: ignore[assignment]
+
+    await service.send_response(build_member_chat_id(tenant["tenant_id"], member["member_id"]), "提醒内容")
+
+    assert seen_context_tokens == ["ctx-old", "ctx-new"]
+    assert ilink_client.sent_messages[0]["context_token"] == "ctx-new"
 
     await service.stop()

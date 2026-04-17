@@ -187,6 +187,7 @@ async def run(settings: Settings) -> None:
             base_url=settings.wechat_base_url,
             account_path=settings.wechat_account_path,
             state_path=settings.wechat_state_path,
+            debug_log_path=settings.logs_path / "wechat_context_debug.jsonl",
             qr_total_timeout_seconds=settings.wechat_qr_total_timeout_seconds,
             qr_poll_interval_seconds=settings.wechat_qr_poll_interval_seconds,
             poll_timeout_ms=settings.wechat_poll_timeout_ms,
@@ -205,6 +206,7 @@ async def run(settings: Settings) -> None:
             poll_timeout_ms=settings.wechat_poll_timeout_ms,
             max_reply_chars=settings.wechat_max_reply_chars,
             message_handler=lambda cid, text: handle_message(cid, text, "wechat"),
+            debug_log_path=settings.logs_path / "wechat_context_debug.jsonl",
         )
 
     if settings.wechat_mp_enabled:
