@@ -7,7 +7,7 @@ name = "xclaw"
 version = "0.1.0"
 description = "Python-based intelligent Agent runtime for task processing and stock investment assistance"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     # Core async & HTTP
