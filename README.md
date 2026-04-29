@@ -116,6 +116,12 @@ pip install -e .
 pip install -e '.[dev]'
 ```
 
+也可以使用 `uv`：
+
+```bash
+uv sync --extra dev
+```
+
 ### 2. 配置
 
 **方式 A：交互式向导**
@@ -1290,6 +1296,12 @@ python -m pytest tests/ --cov=xclaw --cov-report=term-missing
 
 # 运行诊断
 xclaw doctor
+```
+
+使用 `uv` 时可以直接执行仓库内脚本：
+
+```bash
+bash /home/runner/work/XClaw/XClaw/scripts/uv-build.sh
 ```
 
 ### 测试结构
