@@ -7,7 +7,7 @@ name = "xclaw"
 version = "0.1.0"
 description = "Python-based intelligent Agent runtime for task processing and stock investment assistance"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     # Core async & HTTP
@@ -37,12 +37,15 @@ dependencies = [
     # Data analysis
     "pandas>=2.2",
     "pandas-ta",
+    "matplotlib>=3.10.9",
     # Scheduling
     "APScheduler>=3.10",
     # Web scraping helpers
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
+    "Pillow>=12.2.0",
     "qrcode>=7.4",
+    "reportlab>=4.4.10",
 ]
 
 [project.optional-dependencies]

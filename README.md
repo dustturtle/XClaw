@@ -2,7 +2,7 @@
 
 > 基于 MicroClaw 思路的 Python 多功能 **AI Agent 运行时**，聚焦**任务处理**与**A股/美股/港股投资助手**，面向中国用户打造。
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
 
@@ -99,7 +99,7 @@
 
 ### 环境要求
 
-- Python **3.11+**
+- Python **3.12+**
 - （可选）Docker & Docker Compose
 
 ### 1. 安装
@@ -114,6 +114,12 @@ pip install -e .
 
 # 安装（开发环境，含测试工具）
 pip install -e '.[dev]'
+```
+
+也可以使用 `uv`：
+
+```bash
+uv sync --extra dev
 ```
 
 ### 2. 配置
@@ -1290,6 +1296,12 @@ python -m pytest tests/ --cov=xclaw --cov-report=term-missing
 
 # 运行诊断
 xclaw doctor
+```
+
+使用 `uv` 时可以直接执行仓库内脚本：
+
+```bash
+bash ./scripts/uv-build.sh
 ```
 
 ### 测试结构
