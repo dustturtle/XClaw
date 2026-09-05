@@ -37,6 +37,8 @@ def start(config: str) -> None:
 @main.command()
 def setup() -> None:
     """Interactive setup wizard to create xclaw.config.yaml."""
+    from xclaw.config import DEFAULT_LLM_PROVIDER, DEFAULT_MODEL, get_default_base_url
+
     config_path = Path("xclaw.config.yaml")
     example_path = Path("xclaw.config.example.yaml")
 
@@ -48,13 +50,13 @@ def setup() -> None:
 
     # Basic prompts
     provider = click.prompt(
-        "LLM provider", default="anthropic",
+        "LLM provider", default=DEFAULT_LLM_PROVIDER,
         type=click.Choice(["anthropic", "openai", "deepseek", "ollama"])
     )
     api_key = click.prompt("API key", default="", hide_input=True)
     model_defaults = {
         "anthropic": "claude-opus-4-5",
-        "openai": "gpt-4o",
+        "openai": DEFAULT_MODEL,
         "deepseek": "deepseek-chat",
         "ollama": "llama3",
     }
@@ -66,6 +68,7 @@ def setup() -> None:
         f"llm_provider: \"{provider}\"",
         f"api_key: \"{api_key}\"",
         f"model: \"{model}\"",
+        f"base_url: \"{get_default_base_url(provider, model)}\"",
         f"max_tokens: 4096",
         f"max_tool_iterations: 10",
         "",

@@ -2,6 +2,8 @@
 
 日期：2026-09-05，Asia/Shanghai。
 
+后续新模型与图片能力复验见 [GLM-5.3-Flash 验收报告](glm53flash-acceptance-report.md)；本文保留 GLM-4.7 的原始实施记录。
+
 ## 结论
 
 已完成独立 PowerCore 到 XClaw 的可选执行后端接入，并完成本机真实 Web/HTTP 功能闭环验收。

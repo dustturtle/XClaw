@@ -80,3 +80,16 @@ MCP catalog 的 Authorization 使用 `env:XCLAW_POWERCORE_MCP_AUTHORIZATION`，�
 真实外部 IM 渠道、生产鉴权和镜像内运行需要各自独立验收，不能用本机 Web 验收替代。
 
 本轮实测结果、Run 标识和已知限制见 [实施与验证报告](powercore-integration-report.md)。
+
+## 图片输入
+
+PowerCore 后端的聊天页可以选择并预览 PNG/JPEG/WebP，最多 4 张、每张 5 MB、2500 万像素。
+`/api/chat` 和 `/api/chat/stream` 接受可选 `attachments` 数组，每项为
+`{"name":"image.png","media_type":"image/png","data":"<base64>"}`；有附件时 `message` 可省略。
+入口复用现有可信会话绑定，并转换为 PowerCore 已有的 image ContentBlock，不依赖某个模型名称。
+模型本身必须具备图像理解能力。当前 native 后端、音频、视频、SVG、远程 URL 和其他文件类型
+未开放该入口。文字追问等待期间如需新传图片，应先回答或发送 `/reset`。
+
+可在真实验收命令增加 `--expected-model <模型 ID> --multimodal --numeric-transcription`，检查
+实际 Run 模型、随机图像事实、图片续问及行情数值与原始工具输出的一致性。
+新模型结果见 [GLM-5.3-Flash 验收报告](glm53flash-acceptance-report.md)。

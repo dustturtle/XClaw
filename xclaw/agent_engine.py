@@ -10,6 +10,8 @@ from typing import Any
 
 from loguru import logger
 
+from xclaw.attachments import ImageAttachment
+
 from xclaw.db import Database
 from xclaw.llm import LLMProvider
 from xclaw.llm_types import (
@@ -226,6 +228,7 @@ async def agent_loop(
     ctx: AgentContext,
     user_message: str,
     max_iterations: int | None = None,
+    attachments: list[ImageAttachment] | None = None,
 ) -> str:
     """Core Agent loop.
 
@@ -245,6 +248,10 @@ async def agent_loop(
 
     # ── 1. Quick memory path ────────────────────────────────────────────────
     stripped_message = user_message.strip()
+    if attachments:
+        if ctx.powercore is None:
+            raise ValueError("当前执行后端未启用图片输入")
+        return await ctx.powercore.run(ctx, user_message, max_iterations=max_iterations, attachments=attachments)
     if _RESET_PATTERN.match(stripped_message):
         reply = "当前会话上下文已重置。后续消息将从干净上下文重新开始。"
         if not ctx.skip_session_persistence:

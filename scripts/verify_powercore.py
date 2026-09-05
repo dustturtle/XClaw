@@ -7,9 +7,11 @@ and reads SQLite plus public Run events back. No credentials or mocked tools.
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import time
@@ -18,11 +20,40 @@ import uuid
 import httpx
 
 
+def json_reply(text):
+    return json.loads(text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip())
+
+
+def visual_fixture(path):
+    from PIL import Image, ImageDraw, ImageFont
+
+    challenge = uuid.uuid4().hex[:8].upper()
+    row_b = f"{1100 + int(uuid.uuid4().hex[:3], 16) % 900}.{int(uuid.uuid4().hex[:2], 16) % 100:02d}"
+    image = Image.new("RGB", (1200, 780), "#fffaf2")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=48)
+    draw.text((60, 35), f"CHALLENGE: {challenge}", fill="#222222", font=font)
+    draw.polygon([(280, 150), (130, 450), (430, 450)], fill="#df241d")
+    draw.rectangle((730, 150, 1030, 450), fill="#185ddb")
+    draw.text((190, 475), "LEFT", fill="#222222", font=font)
+    draw.text((780, 475), "RIGHT", fill="#222222", font=font)
+    draw.text((100, 585), "ROW_A   1288.00", fill="#222222", font=font)
+    draw.text((100, 670), f"ROW_B   {row_b}", fill="#222222", font=font)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, "PNG")
+    attachment = {"name": "vision.png", "media_type": "image/png", "data": base64.b64encode(path.read_bytes()).decode()}
+    expected = {"challenge": challenge, "left_shape": "triangle", "left_color": "red", "right_shape": "square", "right_color": "blue", "row_a": "1288.00", "row_b": row_b}
+    return attachment, expected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
     parser.add_argument("--powercore-url", default="http://127.0.0.1:18080")
+    parser.add_argument("--expected-model", help="Require the UI configuration and every Run to use this model")
+    parser.add_argument("--multimodal", action="store_true", help="Verify actual image input and follow-up through XClaw")
+    parser.add_argument("--numeric-transcription", action="store_true", help="Compare the final numeric table with actual tool results")
     args = parser.parse_args()
     database = args.data_dir.resolve() / "xclaw.db"
     db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
@@ -65,9 +96,12 @@ def main() -> None:
                         break
         return collected
 
-    def chat(name, prompt, *, chat_id=first, tools=(), status="completed"):
+    def chat(name, prompt, *, chat_id=first, tools=(), status="completed", attachments=None):
         started = time.monotonic()
-        response = client.post("/api/chat", json={"chat_id": chat_id, "message": prompt})
+        payload = {"chat_id": chat_id, "message": prompt}
+        if attachments:
+            payload["attachments"] = attachments
+        response = client.post("/api/chat", json=payload)
         response.raise_for_status()
         reply = response.json()["reply"]
         run = session(chat_id)
@@ -77,6 +111,8 @@ def main() -> None:
         evidence["cases"].append(record)
         assert reply.strip(), f"{name}: empty response"
         assert run["status"] == status, f"{name}: unexpected status {run['status']}"
+        if args.expected_model:
+            assert any(event.get("type") == "run.started" and event.get("model") == args.expected_model for event in run_events), f"{name}: wrong model"
         for tool in tools:
             assert any(event.get("type") == "tool.completed" and event.get("name", "").endswith(tool)
                        and event.get("is_error") is False for event in run_events), f"{name}: no successful {tool}"
@@ -87,6 +123,22 @@ def main() -> None:
         config = client.get("/api/config")
         config.raise_for_status()
         assert config.json()["agent_backend"] == "powercore", "Not running PowerCore backend"
+        evidence["configuration"] = {key: config.json().get(key) for key in ("agent_backend", "model", "max_tokens", "supports_images")}
+        if args.expected_model:
+            assert config.json()["model"] == args.expected_model, "UI model differs from expected model"
+        if args.multimodal:
+            assert config.json().get("supports_images") is True
+            path = args.data_dir.resolve() / "powercore" / f"vision-{suffix}.png"
+            attachment, expected = visual_fixture(path)
+            vision_chat = f"pc-vision-{suffix}"
+            evidence["chats"].append(vision_chat)
+            evidence["vision_fixture"] = {"path": str(path), "expected": expected}
+            visual = chat("image_reading", "读取附件，严格输出JSON字段 challenge、left_shape、left_color、right_shape、right_color、row_a、row_b。颜色和形状用英文小写，数字逐字转录为字符串，不要计算或调用工具。", chat_id=vision_chat, attachments=[attachment])
+            assert json_reply(visual["reply"]) == expected, "image contents were not transcribed exactly"
+            assert not any(event["type"] == "tool.started" for event in visual["events"])
+            follow = chat("image_followup", "刚才图片中的挑战码和ROW_A是什么？只返回JSON字段challenge和row_a，值都用字符串。不调用工具。", chat_id=vision_chat)
+            assert follow["run"]["session_id"] == visual["run"]["session_id"]
+            assert json_reply(follow["reply"]) == {"challenge": expected["challenge"], "row_a": expected["row_a"]}
         quote = chat("quote", "请用行情工具查询贵州茅台 600519，只列代码、价格、报价时间和数据源。", tools=("stock_quote",))
         assert "600519" in quote["reply"]
         followup = chat("continuation", "刚才是哪只股票？请给出股票名称、代码、昨收和涨跌幅，不要重新查询。")
@@ -129,7 +181,36 @@ def main() -> None:
         children = rows("SELECT * FROM powercore_runs WHERE chat_id=? AND session_id!=? AND allowed_tools_json NOT LIKE '%sub_agent%'", first_id, delegated["run"]["session_id"])
         assert any(run["status"] == "completed" for run in children), "no independent successful child run"
         evidence["child_runs"] = [{"run": run, "events": events(run["run_id"])} for run in children]
-        chat("history_and_indicators", "请查询600519最近20条日K线，并用技术指标工具给出MA5和MA20。请实际调用两个工具。数据不可用就明确说，不要编造。", tools=("stock_history", "stock_indicators"))
+        history_prompt = "请查询600519最近20条日K线，并用技术指标工具给出MA5和MA20。请实际调用两个工具。数据不可用就明确说，不要编造。"
+        if args.numeric_transcription:
+            history_prompt += ' 严格只输出JSON：{"rows":[{"date":"YYYY-MM-DD","open":"数字","close":"数字","high":"数字","low":"数字"}],"ma5":"数字","ma20":"数字"}。完整返回20行，所有数值按工具输出保留两位小数并用字符串，不要手算。'
+        history = chat("history_and_indicators", history_prompt, tools=("stock_history", "stock_indicators"))
+        if args.numeric_transcription:
+            audit_response = core.get(f"/admin/runs/{history['run']['run_id']}/audit")
+            audit_response.raise_for_status()
+            messages = audit_response.json()["checkpoint"]["history"]
+            names = {block["id"]: block["name"] for message in messages for block in message["content"] if block["type"] == "tool_use"}
+            sources = {}
+            for message in messages:
+                for block in message["content"]:
+                    if block["type"] != "tool_result" or block.get("is_error"):
+                        continue
+                    name = names.get(block["tool_use_id"], "")
+                    for tool in ("stock_history", "stock_indicators"):
+                        if name.endswith(tool):
+                            result = json.loads(block["content"][0]["text"])["result"]["result"]
+                            sources[tool] = "\n".join(item["text"] for item in result["content"] if item["type"] == "text")
+            expected_rows = []
+            for line in sources["stock_history"].splitlines():
+                fields = line.split()
+                if fields and re.fullmatch(r"\d{4}-\d{2}-\d{2}", fields[0]):
+                    expected_rows.append(dict(zip(("date", "open", "close", "high", "low"), fields[:5])))
+            expected = {"rows": expected_rows}
+            for name in ("ma5", "ma20"):
+                expected[name] = re.search(rf"^{name.upper()}:\s*(\d+\.\d+)", sources["stock_indicators"], re.MULTILINE)[1]
+            evidence["numeric_transcription"] = {"sources": sources, "expected": expected, "actual": json_reply(history["reply"])}
+            assert len(expected_rows) == 20 and json_reply(history["reply"]) == expected, "numeric transcription differs from actual tool data"
+            print("PASS numeric_transcription: 20 rows and MA5/MA20 match original tool data", flush=True)
         chat("investment_report", "请为本会话自选股生成一份本地日报，实际调用 investment_report 的 generate，并简要说明结果和数据不足之处。不提供买卖建议。", tools=("investment_report",))
         reports = rows("SELECT id,title,summary FROM investment_reports WHERE chat_id=?", first_id)
         assert reports, "report not persisted"

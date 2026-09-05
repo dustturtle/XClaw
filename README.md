@@ -142,16 +142,17 @@ xclaw setup
 ```bash
 cp xclaw.config.example.yaml xclaw.config.yaml
 # 用编辑器打开 xclaw.config.yaml，至少填写：
-#   api_key: "sk-..."
-#   llm_provider: "anthropic"   # 或 openai / openai-codex / deepseek / ollama
+#   api_key: "your-ark-api-key"
+# 默认 openai 协议 + 方舟 GLM-5.3-Flash；切换供应商时同步修改 model 和 base_url
 ```
 
 **方式 C：纯环境变量（无配置文件）**
 
 ```bash
-export XCLAW_LLM_PROVIDER="anthropic"
-export XCLAW_API_KEY="sk-..."
-export XCLAW_MODEL="claude-opus-4-5"
+export XCLAW_LLM_PROVIDER="openai"
+export XCLAW_API_KEY="your-ark-api-key"
+export XCLAW_MODEL="glm-5-3-flash-260826"
+export XCLAW_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 > 优先级：**环境变量** > **YAML 配置文件** > **默认值**  
@@ -192,9 +193,10 @@ curl -s -X POST http://127.0.0.1:8080/api/chat \
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm_provider` | `anthropic` | `anthropic` / `openai` / `openai-codex` / `deepseek` / `ollama` |
+| `llm_provider` | `openai` | `anthropic` / `openai` / `openai-codex` / `deepseek` / `ollama` |
 | `api_key` | `""` | LLM API Key（`openai-codex` 可留空，改走 OAuth） |
-| `model` | `claude-opus-4-5` | 模型名称，可替换为 `gpt-4o`、`gpt-5.4`、`deepseek-chat`、`llama3` 等 |
+| `model` | `glm-5-3-flash-260826` | 默认 GLM-5.3-Flash；可按供应商替换模型 |
+| `base_url` | `https://ark.cn-beijing.volces.com/api/v3` | 未指定地址时，仅默认模型组合使用方舟；其他组合沿用供应商默认地址，自定义地址优先 |
 | `max_tokens` | `4096` | 单次 LLM 回复最大 token 数 |
 | `max_tool_iterations` | `10` | Agent 单轮工具调用最大轮次 |
 
@@ -1229,9 +1231,10 @@ docker run -d \
   --name xclaw \
   -p 8080:8080 \
   -v xclaw_data:/data \
-  -e XCLAW_LLM_PROVIDER=anthropic \
-  -e XCLAW_API_KEY=sk-... \
-  -e XCLAW_MODEL=claude-opus-4-5 \
+  -e XCLAW_LLM_PROVIDER=openai \
+  -e XCLAW_API_KEY=your-ark-api-key \
+  -e XCLAW_MODEL=glm-5-3-flash-260826 \
+  -e XCLAW_BASE_URL=https://ark.cn-beijing.volces.com/api/v3 \
   -e XCLAW_WEB_AUTH_TOKEN=my-secret-token \
   -e XCLAW_MULTI_USER_MODE=true \
   -e XCLAW_DATA_DIR=/data \

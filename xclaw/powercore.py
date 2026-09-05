@@ -13,6 +13,7 @@ import httpx
 from loguru import logger
 
 from xclaw.tools import RiskLevel, ToolRegistry
+from xclaw.attachments import ImageAttachment
 
 SERVICE_API_VERSION = 1
 MCP_PROTOCOL_VERSION = "2026-07-28"
@@ -106,20 +107,25 @@ class PowerCoreClient:
             await self.db.update_powercore_run(previous["run_id"], "cancelled", previous["cursor"])
         await self.db.clear_powercore_session(chat_id)
 
-    async def run(self, ctx: Any, text: str, max_iterations: int | None = None) -> str:
+    async def run(self, ctx: Any, text: str, max_iterations: int | None = None,
+                  attachments: list[ImageAttachment] | None = None) -> str:
         # A child has a separate PowerCore session and must not lock its parent.
         if ctx.skip_message_persistence:
-            return await self._run(ctx, text, max_iterations)
+            return await self._run(ctx, text, max_iterations, attachments)
         async with self._locks[ctx.chat_id]:
-            return await self._run(ctx, text, max_iterations)
+            return await self._run(ctx, text, max_iterations, attachments)
 
-    async def _run(self, ctx: Any, text: str, max_iterations: int | None) -> str:
+    async def _run(self, ctx: Any, text: str, max_iterations: int | None,
+                   attachments: list[ImageAttachment] | None = None) -> str:
         run_id = None
         if not ctx.skip_message_persistence:
-            await self.db.save_message(ctx.chat_id, "user", text)
+            display_text = text + "".join(f"\n[图片附件：{item.name}]" for item in attachments or [])
+            await self.db.save_message(ctx.chat_id, "user", display_text)
         try:
             previous = None if ctx.skip_session_persistence else await self.db.get_powercore_session(ctx.chat_id)
             if previous and previous["input_request_json"]:
+                if attachments:
+                    raise PowerCoreError("当前追问只接受文字回答；如需分析图片，请先发送 /reset 再上传。")
                 pending = json.loads(previous["input_request_json"])
                 run_id = previous["run_id"]
                 schema = pending.get("response_schema", {})
@@ -157,6 +163,9 @@ class PowerCoreClient:
                     "prompt": prompt, "profile": profile,
                     "idempotency_key": f"xclaw-{uuid.uuid4().hex}",
                 }
+                if attachments:
+                    request.pop("prompt")
+                    request["input"] = [{"type": "text", "text": prompt}, *[item.to_powercore() for item in attachments]]
                 request["max_turns"] = max_iterations if max_iterations is not None else self.settings.max_tool_iterations
                 for attempt in range(2):
                     try:

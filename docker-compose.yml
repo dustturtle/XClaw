@@ -18,7 +18,7 @@ services:
       - XCLAW_WEB_HOST=0.0.0.0
       # Override individual settings via environment variables:
       # - XCLAW_API_KEY=sk-...
-      # - XCLAW_MODEL=claude-opus-4-5
+      # - XCLAW_MODEL=glm-5-3-flash-260826
       # - XCLAW_WEB_AUTH_TOKEN=your-secret-token
       # - XCLAW_MULTI_USER_MODE=true
     healthcheck:

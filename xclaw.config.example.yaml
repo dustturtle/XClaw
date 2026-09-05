@@ -2,10 +2,11 @@
 # 复制本文件为 xclaw.config.yaml 并填入实际值
 
 # ── LLM 配置 ──────────────────────────────────────────────────────────────────
-llm_provider: "anthropic"          # anthropic | openai | deepseek | ollama | openai-codex
+llm_provider: "openai"             # anthropic | openai | deepseek | ollama | openai-codex
 api_key: ""                        # LLM API Key（openai-codex 可留空，也可通过 XCLAW_API_KEY 环境变量设置）
-model: "claude-opus-4-5"           # openai-codex 推荐 gpt-5.4
-base_url: ""                       # OpenAI-compatible 自定义网关地址；openai-codex 留空默认走 chatgpt.com/backend-api
+model: "glm-5-3-flash-260826"       # 默认 GLM-5.3-Flash；openai-codex 推荐 gpt-5.4
+base_url: "https://ark.cn-beijing.volces.com/api/v3"
+# 切换模型/供应商时同步修改 base_url，或留空使用对应默认地址；openai-codex 留空走 chatgpt.com/backend-api
 temperature:                       # 可选，OpenAI-compatible 常用；0-2
 timeout: 120.0                     # LLM 请求超时（秒）
 thinking:                          # 可选，支持时启用深度思考模式

@@ -7,8 +7,20 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DEFAULT_LLM_PROVIDER = "openai"
+DEFAULT_MODEL = "glm-5-3-flash-260826"
+DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+
+
+def get_default_base_url(provider: str, model: str) -> str:
+    """Resolve the default model preset without changing other provider routes."""
+    if (provider, model) == (DEFAULT_LLM_PROVIDER, DEFAULT_MODEL):
+        return DEFAULT_BASE_URL
+    return ""
 
 
 class QQAccountSettings(BaseModel):
@@ -43,9 +55,9 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ──────────────────────────────────────────────────────────────────
-    llm_provider: str = "anthropic"
+    llm_provider: str = DEFAULT_LLM_PROVIDER
     api_key: str = ""
-    model: str = "claude-opus-4-5"
+    model: str = DEFAULT_MODEL
     base_url: str = ""
     temperature: float | None = None
     timeout: float = 120.0
@@ -153,6 +165,13 @@ class Settings(BaseSettings):
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}")
         return v
+
+    @field_validator("base_url")
+    @classmethod
+    def resolve_base_url(cls, v: str, info: ValidationInfo) -> str:
+        return v or get_default_base_url(
+            info.data.get("llm_provider", ""), info.data.get("model", "")
+        )
 
     @field_validator("stock_market_default")
     @classmethod

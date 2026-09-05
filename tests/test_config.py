@@ -7,15 +7,26 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
+from click.testing import CliRunner
 
 from xclaw.config import Settings, load_settings, reset_settings
+
+
+@pytest.fixture(autouse=True)
+def isolated_config_environment(monkeypatch, tmp_path):
+    for key in os.environ:
+        if key.upper().startswith("XCLAW_"):
+            monkeypatch.delenv(key)
+    monkeypatch.chdir(tmp_path)
 
 
 def test_defaults():
     """Settings should have correct defaults without any config file."""
     s = Settings()
-    assert s.llm_provider == "anthropic"
-    assert s.base_url == ""
+    assert s.llm_provider == "openai"
+    assert s.model == "glm-5-3-flash-260826"
+    assert s.base_url == "https://ark.cn-beijing.volces.com/api/v3"
     assert s.temperature is None
     assert s.timeout == 120.0
     assert s.thinking is None
@@ -116,7 +127,72 @@ def test_invalid_timeout():
 def test_load_from_yaml_missing_file():
     """load_settings() with a non-existent file should use defaults."""
     s = load_settings("/nonexistent/path.yaml")
-    assert s.llm_provider == "anthropic"
+    assert s.llm_provider == "openai"
+    assert s.model == "glm-5-3-flash-260826"
+    assert s.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+
+
+def test_example_config_uses_default_model():
+    example = Path(__file__).resolve().parents[1] / "xclaw.config.example.yaml"
+    settings = load_settings(example)
+    assert settings.llm_provider == "openai"
+    assert settings.model == "glm-5-3-flash-260826"
+    assert settings.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+    assert settings.api_key == ""
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("openai", "gpt-4o"),
+        ("openai-codex", "gpt-5.4"),
+        ("anthropic", "claude-opus-4-5"),
+        ("deepseek", "deepseek-chat"),
+        ("ollama", "llama3"),
+    ],
+)
+def test_other_models_do_not_inherit_ark_url(provider, model):
+    settings = Settings(llm_provider=provider, model=model)
+    assert settings.base_url == ""
+
+
+def test_default_model_preserves_custom_url():
+    settings = Settings(base_url="https://example.com/v1")
+    assert settings.model == "glm-5-3-flash-260826"
+    assert settings.base_url == "https://example.com/v1"
+
+
+def test_env_model_override_does_not_inherit_ark_url(monkeypatch):
+    monkeypatch.setenv("XCLAW_MODEL", "gpt-4o")
+    assert Settings().base_url == ""
+
+
+def test_env_base_url_overrides_default_model_preset(monkeypatch):
+    monkeypatch.setenv("XCLAW_BASE_URL", "https://example.com/v1")
+    assert Settings().base_url == "https://example.com/v1"
+
+
+@pytest.mark.parametrize(
+    ("wizard_input", "provider", "model", "base_url"),
+    [
+        ("\n\n\n\n", "openai", "glm-5-3-flash-260826", "https://ark.cn-beijing.volces.com/api/v3"),
+        ("anthropic\n\n\n\n", "anthropic", "claude-opus-4-5", ""),
+        ("openai\n\ngpt-4o\n\n", "openai", "gpt-4o", ""),
+    ],
+)
+def test_setup_writes_selected_model_preset(wizard_input, provider, model, base_url):
+    from xclaw.cli import main
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["setup"], input=wizard_input)
+        assert result.exit_code == 0, result.output
+        config = yaml.safe_load(Path("xclaw.config.yaml").read_text(encoding="utf-8"))
+        assert config["llm_provider"] == provider
+        assert config["model"] == model
+        assert config["base_url"] == base_url
+        assert config["api_key"] == ""
+        assert load_settings().base_url == base_url
 
 
 def test_invalid_provider():

@@ -10,6 +10,7 @@ import uvicorn
 from loguru import logger
 
 from xclaw.agent_engine import AgentContext, agent_loop
+from xclaw.attachments import ImageAttachment
 from xclaw.config import Settings
 from xclaw.db import Database
 from xclaw.llm import create_provider
@@ -135,19 +136,21 @@ async def run(settings: Settings) -> None:
         text: str,
         channel: str = "web",
         chat_type: str = "private",
+        *, attachments: list[ImageAttachment] | None = None,
     ) -> str:
         chat_id = await resolve_message_chat(db, external_chat_id, channel, chat_type)
         ctx = await context_for_chat(chat_id)
         ctx.skip_session_persistence = channel == "scheduler"
-        return await agent_loop(ctx, text)
+        return await agent_loop(ctx, text, attachments=attachments)
 
     async def handle_message_stream(
         external_chat_id: str,
         text: str,
         channel: str = "web",
         chat_type: str = "private",
+        *, attachments: list[ImageAttachment] | None = None,
     ):
-        reply = await handle_message(external_chat_id, text, channel, chat_type)
+        reply = await handle_message(external_chat_id, text, channel, chat_type, attachments=attachments)
         if not reply:
             return
         chunk_size = 120
@@ -317,8 +320,9 @@ async def run(settings: Settings) -> None:
         from xclaw.channels.web import create_web_app
 
         web_app = create_web_app(
-            message_handler=lambda cid, text: handle_message(cid, text, "web"),
-            stream_handler=lambda cid, text: handle_message_stream(cid, text, "web"),
+            message_handler=lambda cid, text, **options: handle_message(cid, text, "web", **options),
+            stream_handler=lambda cid, text, **options: handle_message_stream(cid, text, "web", **options),
+            supports_images=powercore is not None,
             auth_token=settings.web_auth_token,
             rate_limit=settings.rate_limit_per_minute,
             db=db,

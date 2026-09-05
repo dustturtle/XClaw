@@ -10,9 +10,11 @@ from typing import Any, AsyncIterator, Callable, Coroutine
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 from xclaw.channels.wechat import IlinkClientError
 from xclaw.channels.wechat_multi_tenant import (
@@ -31,6 +33,7 @@ from xclaw.channels.wechat_multi_tenant import (
 from xclaw.investment.report_service import InvestmentReportService
 from xclaw.investment.report_export_service import ReportExportService
 from xclaw.oauth import OAuthLoginNotFoundError
+from xclaw.attachments import ChatBodyLimitMiddleware, ImageAttachment, MAX_IMAGES
 
 # Rate limiting (slowapi)
 try:
@@ -47,7 +50,14 @@ except ImportError:
 
 class ChatRequest(BaseModel):
     chat_id: str = "web_default"
-    message: str
+    message: str = ""
+    attachments: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_IMAGES)
+
+    @model_validator(mode="after")
+    def require_content(self):
+        if not self.message.strip() and not self.attachments:
+            raise ValueError("请输入消息或选择图片")
+        return self
 
 
 class ChatResponse(BaseModel):
@@ -99,6 +109,7 @@ def _build_chat_page_html(
     auth_enabled: bool,
     model_name: str,
     provider_name: str,
+    supports_images: bool = False,
 ) -> str:
     """Return a lightweight browser chat UI for local validation."""
     auth_flag = json.dumps(auth_enabled)
@@ -129,6 +140,9 @@ def _build_chat_page_html(
     * {{
       box-sizing: border-box;
     }}
+    .attachment-preview {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }}
+    .attachment-preview img {{ width: 96px; height: 72px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; }}
+    .message img {{ display: block; max-width: 100%; max-height: 320px; margin-top: 12px; border-radius: 10px; object-fit: contain; }}
     html, body {{
       margin: 0;
       min-height: 100%;
@@ -449,6 +463,12 @@ def _build_chat_page_html(
           </div>
           <button class="primary" id="send-btn" type="button">发送</button>
         </div>
+        <div style="{('' if supports_images else 'display:none')}">
+          <label for="image-input">图片附件（PNG / JPEG / WebP，最多 4 张，每张 5 MB）</label>
+          <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp" multiple />
+          <div class="attachment-preview" id="attachment-preview"></div>
+          <button class="ghost" id="clear-images-btn" type="button" hidden>清除图片</button>
+        </div>
         <div class="composer-note" id="composer-note">
           {("当前服务启用了鉴权，页面已为你保留 Token 输入框。" if auth_enabled else "当前服务未启用鉴权，可以直接开始聊天。")}
         </div>
@@ -469,6 +489,49 @@ def _build_chat_page_html(
     const sendBtn = document.getElementById("send-btn");
     const clearBtn = document.getElementById("clear-btn");
     const statusPill = document.getElementById("status-pill");
+    const imageInput = document.getElementById("image-input");
+    const clearImagesBtn = document.getElementById("clear-images-btn");
+    const previewEl = document.getElementById("attachment-preview");
+    let selectedFiles = [];
+    let previewUrls = [];
+
+    function clearImages() {{
+      previewUrls.forEach(url => URL.revokeObjectURL(url));
+      previewUrls = [];
+      selectedFiles = [];
+      previewEl.replaceChildren();
+      imageInput.value = "";
+      clearImagesBtn.hidden = true;
+    }}
+
+    imageInput.addEventListener("change", () => {{
+      const files = Array.from(imageInput.files);
+      clearImages();
+      if (files.length > 4 || files.some(file => file.size > 5 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {{
+        setStatus("请选择最多 4 张 PNG / JPEG / WebP 图片，每张不超过 5 MB");
+        return;
+      }}
+      selectedFiles = files;
+      files.forEach(file => {{
+        const preview = document.createElement("img");
+        const url = URL.createObjectURL(file);
+        previewUrls.push(url);
+        preview.src = url;
+        preview.alt = file.name;
+        previewEl.appendChild(preview);
+      }});
+      clearImagesBtn.hidden = !files.length;
+    }});
+    clearImagesBtn.addEventListener("click", clearImages);
+
+    function readImage(file) {{
+      return new Promise((resolve, reject) => {{
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("图片读取失败"));
+        reader.onload = () => resolve({{ name: file.name, media_type: file.type, data: reader.result.split(",")[1] }});
+        reader.readAsDataURL(file);
+      }});
+    }}
 
     function makeDefaultChatId() {{
       return "web-" + Math.random().toString(36).slice(2, 10);
@@ -478,10 +541,16 @@ def _build_chat_page_html(
       statusPill.textContent = text;
     }}
 
-    function appendMessage(role, text) {{
+    function appendMessage(role, text, attachments = []) {{
       const item = document.createElement("article");
       item.className = "message " + role;
       item.textContent = text;
+      attachments.forEach(attachment => {{
+        const img = document.createElement("img");
+        img.src = `data:${{attachment.media_type}};base64,${{attachment.data}}`;
+        img.alt = attachment.name;
+        item.appendChild(img);
+      }});
       messagesEl.appendChild(item);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }}
@@ -497,7 +566,9 @@ def _build_chat_page_html(
     }}
 
     async function sendMessage() {{
-      const message = messageInput.value.trim();
+      if (sendBtn.disabled) return;
+      const message = messageInput.value.trim() || (selectedFiles.length ? "请描述图片内容。" : "");
+      const files = [...selectedFiles];
       const chatId = chatIdInput.value.trim();
       const token = tokenInput.value.trim();
 
@@ -518,9 +589,9 @@ def _build_chat_page_html(
       }}
 
       persistPreferences();
-      appendMessage("user", message);
-      messageInput.value = "";
       sendBtn.disabled = true;
+      imageInput.disabled = true;
+      clearImagesBtn.disabled = true;
       setStatus("正在请求模型...");
 
       const headers = {{
@@ -531,10 +602,14 @@ def _build_chat_page_html(
       }}
 
       try {{
+        const attachments = await Promise.all(files.map(readImage));
+        appendMessage("user", message, attachments);
+        messageInput.value = "";
+        clearImages();
         const response = await fetch("/api/chat", {{
           method: "POST",
           headers,
-          body: JSON.stringify({{ chat_id: chatId, message }})
+          body: JSON.stringify({{ chat_id: chatId, message, attachments }})
         }});
 
         if (!response.ok) {{
@@ -555,6 +630,8 @@ def _build_chat_page_html(
         setStatus("请求失败");
       }} finally {{
         sendBtn.disabled = false;
+        imageInput.disabled = false;
+        clearImagesBtn.disabled = false;
         messageInput.focus();
       }}
     }}
@@ -769,8 +846,8 @@ def _user_namespace(token: str) -> str:
 
 
 def create_web_app(
-    message_handler: Callable[[str, str], Coroutine[Any, Any, str]],
-    stream_handler: Callable[[str, str], AsyncIterator[str]] | None = None,
+    message_handler: Callable[..., Coroutine[Any, Any, str]],
+    stream_handler: Callable[..., AsyncIterator[str]] | None = None,
     auth_token: str = "",
     rate_limit: int = 20,
     db: Any = None,
@@ -778,6 +855,7 @@ def create_web_app(
     multi_user_mode: bool = False,
     tool_registry: Any = None,
     oauth_manager: Any = None,
+    supports_images: bool = False,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -794,6 +872,17 @@ def create_web_app(
         tool_registry:   Optional ToolRegistry instance (for MCP server mode)
     """
     app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs")
+    app.add_middleware(ChatBodyLimitMiddleware)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, error: RequestValidationError):
+        if request.url.path not in {"/api/chat", "/api/chat/stream"}:
+            return await request_validation_exception_handler(request, error)
+        # Validation errors must not echo an uploaded private image as base64.
+        return JSONResponse(status_code=422, content={"detail": [
+            {key: value for key, value in item.items() if key in {"loc", "msg", "type"}}
+            for item in error.errors()
+        ]})
 
     # CORS for local development
     app.add_middleware(
@@ -845,6 +934,7 @@ def create_web_app(
                 auth_enabled=bool(auth_token),
                 model_name=model_name,
                 provider_name=provider_name,
+                supports_images=supports_images,
             )
         )
 
@@ -860,8 +950,11 @@ def create_web_app(
     async def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
         """Non-streaming chat endpoint."""
         effective_id = _effective_chat_id(req.chat_id, authorization)
+        if req.attachments and not supports_images:
+            raise HTTPException(status_code=400, detail="当前执行后端未启用图片输入")
         try:
-            reply = await message_handler(effective_id, req.message)
+            options = {"attachments": req.attachments} if req.attachments else {}
+            reply = await message_handler(effective_id, req.message, **options)
             return ChatResponse(chat_id=effective_id, reply=reply)
         except Exception as exc:
             logger.error(f"Chat endpoint error: {exc}")
@@ -875,10 +968,13 @@ def create_web_app(
         if stream_handler is None:
             raise HTTPException(status_code=501, detail="Streaming not enabled")
         effective_id = _effective_chat_id(req.chat_id, authorization)
+        if req.attachments and not supports_images:
+            raise HTTPException(status_code=400, detail="当前执行后端未启用图片输入")
 
         async def event_generator():
             try:
-                async for chunk in stream_handler(effective_id, req.message):
+                options = {"attachments": req.attachments} if req.attachments else {}
+                async for chunk in stream_handler(effective_id, req.message, **options):
                     yield {"data": chunk}
                 yield {"data": "[DONE]"}
             except Exception as exc:
@@ -981,6 +1077,7 @@ def create_web_app(
         if not isinstance(strategy_report_max_symbols, int):
             strategy_report_max_symbols = 10
         safe = {
+            "supports_images": supports_images,
             "agent_backend": "powercore" if getattr(settings, "agent_backend", "native") == "powercore" else "native",
             "llm_provider": settings.llm_provider,
             "model": settings.model,
