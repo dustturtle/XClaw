@@ -18,6 +18,8 @@ class StockBacktestTool(Tool):
     - ``rsi``:        Buy when RSI < oversold threshold; sell when RSI > overbought.
     """
 
+    read_only = True
+
     # Number of extra warmup bars beyond the indicator period needed before signals are valid.
     _MIN_WARMUP_BARS = 5
 

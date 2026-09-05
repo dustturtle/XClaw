@@ -19,6 +19,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class StockHistoryTool(Tool):
     """Fetch historical candlestick (OHLCV) data for a stock."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_history"

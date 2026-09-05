@@ -268,9 +268,10 @@ class _FakeTicker:
 @pytest.mark.asyncio
 async def test_earnings_analysis_preview():
     tool = EarningsAnalysisTool()
+    future_date = (pd.Timestamp.now("UTC") + pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     earnings_dates = pd.DataFrame(
         [
-            {"Earnings Date": "2026-05-01", "EPS Estimate": 2.5, "Reported EPS": None, "Surprise(%)": None},
+            {"Earnings Date": future_date, "EPS Estimate": 2.5, "Reported EPS": None, "Surprise(%)": None},
             {"Earnings Date": "2026-02-01", "EPS Estimate": 2.1, "Reported EPS": 2.3, "Surprise(%)": 9.5},
             {"Earnings Date": "2025-11-01", "EPS Estimate": 1.9, "Reported EPS": 1.8, "Surprise(%)": -5.3},
         ]
@@ -283,7 +284,7 @@ async def test_earnings_analysis_preview():
             "numberOfAnalystOpinions": 32,
             "targetMeanPrice": 225.0,
         },
-        calendar={"Earnings Date": ["2026-05-01", "2026-05-02"]},
+        calendar={"Earnings Date": [future_date]},
         earnings_dates=earnings_dates,
     )
 
@@ -293,7 +294,7 @@ async def test_earnings_analysis_preview():
     assert not result.is_error
     assert "财报前瞻" in result.content
     assert "Apple Inc." in result.content
-    assert "2026-05-01" in result.content
+    assert future_date in result.content
     assert "EPS 一致预期" in result.content
 
 

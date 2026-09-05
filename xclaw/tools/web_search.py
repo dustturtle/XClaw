@@ -12,6 +12,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class WebSearchTool(Tool):
     """Search the web via DuckDuckGo Instant Answer API."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "web_search"

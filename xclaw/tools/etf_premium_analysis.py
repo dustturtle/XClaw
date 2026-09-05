@@ -9,6 +9,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 
 
 class ETFPremiumAnalysisTool(Tool):
+    read_only = True
+
     @property
     def name(self) -> str:
         return "etf_premium_analysis"
@@ -85,4 +87,3 @@ class ETFPremiumAnalysisTool(Tool):
         if abs_pct < 1.5:
             return f"当前存在中等{state}，适合结合盘中流动性继续观察。"
         return f"当前{state}较明显，需警惕情绪驱动或流动性导致的价格偏离。"
-

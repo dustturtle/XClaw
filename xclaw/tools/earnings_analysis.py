@@ -14,6 +14,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class EarningsAnalysisTool(Tool):
     """Analyze upcoming or recent earnings events using yfinance data."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "earnings_analysis"

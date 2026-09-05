@@ -39,6 +39,23 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS powercore_sessions (
+    chat_id INTEGER PRIMARY KEY REFERENCES chats(id),
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS powercore_runs (
+    run_id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id),
+    session_id TEXT NOT NULL,
+    allowed_tools_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    cursor INTEGER NOT NULL DEFAULT 0,
+    input_request_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER REFERENCES chats(id),
@@ -319,6 +336,51 @@ class Database:
         )
         await self.conn.commit()
 
+    async def bind_powercore_run(
+        self, chat_id: int, run_id: str, session_id: str, allowed_tools: list[str],
+        *, conversational: bool = True,
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO powercore_runs(run_id,chat_id,session_id,allowed_tools_json) "
+            "VALUES(?,?,?,?) ON CONFLICT(run_id) DO NOTHING",
+            (run_id, chat_id, session_id, json.dumps(allowed_tools)),
+        )
+        if conversational:
+            await self.conn.execute(
+                "INSERT INTO powercore_sessions(chat_id,session_id,run_id) VALUES(?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET session_id=excluded.session_id,run_id=excluded.run_id",
+                (chat_id, session_id, run_id),
+            )
+        await self.conn.commit()
+
+    async def get_powercore_run(self, run_id: str) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM powercore_runs WHERE run_id=?", (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_powercore_session(self, chat_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT r.* FROM powercore_sessions s JOIN powercore_runs r ON r.run_id=s.run_id "
+            "WHERE s.chat_id=?", (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def update_powercore_run(
+        self, run_id: str, status: str, cursor: int, input_request: dict | None = None,
+    ) -> None:
+        await self.conn.execute(
+            "UPDATE powercore_runs SET status=?,cursor=?,input_request_json=? WHERE run_id=?",
+            (status, cursor, json.dumps(input_request) if input_request else None, run_id),
+        )
+        await self.conn.commit()
+
+    async def clear_powercore_session(self, chat_id: int) -> None:
+        await self.conn.execute("DELETE FROM powercore_sessions WHERE chat_id=?", (chat_id,))
+        await self.conn.commit()
+
     # ── Memories ──────────────────────────────────────────────────────────────
 
     async def add_memory(
@@ -387,6 +449,15 @@ class Database:
             (status, task_id),
         )
         await self.conn.commit()
+
+    async def cancel_chat_task(self, chat_id: int, task_id: int) -> bool:
+        async with self.conn.execute(
+            "UPDATE scheduled_tasks SET status='cancelled' WHERE id=? AND chat_id=? AND status='active'",
+            (task_id, chat_id),
+        ) as cursor:
+            cancelled = cursor.rowcount == 1
+        await self.conn.commit()
+        return cancelled
 
     async def get_scheduled_task(self, task_id: int) -> dict[str, Any] | None:
         async with self.conn.execute(

@@ -49,7 +49,7 @@ class ScheduleTaskTool(Tool):
                 },
                 "run_once_at": {
                     "type": "string",
-                    "description": "一次性任务的执行时间，格式 YYYY-MM-DD HH:MM（cron_expression 为空时使用）",
+                    "description": "一次性任务的 ISO 8601 时间，必须保留用户提供的时区偏移和秒数。没有时区时按系统配置时区解释。cron_expression 为空时使用。",
                 },
             },
             "required": ["description", "prompt"],
@@ -109,6 +109,8 @@ class ScheduleTaskTool(Tool):
 
 class ListScheduledTasksTool(Tool):
     """List all active scheduled tasks for this chat."""
+
+    read_only = True
 
     @property
     def name(self) -> str:
@@ -177,7 +179,8 @@ class CancelScheduledTaskTool(Tool):
         task_id = int(params.get("task_id", 0))
         if not task_id:
             return ToolResult(content="必须提供 task_id", is_error=True)
-        await context.db.update_task_status(task_id, "cancelled")
+        if not await context.db.cancel_chat_task(context.chat_id, task_id):
+            return ToolResult(content="未找到当前对话的活跃任务", is_error=True)
         if context.scheduler is not None:
             context.scheduler.remove_task(task_id)
         return ToolResult(content=f"任务 {task_id} 已取消")

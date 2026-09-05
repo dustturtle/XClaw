@@ -10,6 +10,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class StockZTPoolTool(Tool):
     """Fetch today's limit-up (涨停板) stock pool from East Money."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_zt_pool"

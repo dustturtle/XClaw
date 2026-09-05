@@ -202,6 +202,25 @@ def _make_text_message(
     )
 
 
+def _make_image_message(
+    *,
+    sender_id: str,
+    context_token: str,
+    message_id: str,
+    create_time_ms: int,
+) -> IlinkWireMessage:
+    return IlinkWireMessage.model_validate(
+        {
+            "from_user_id": sender_id,
+            "message_type": 1,
+            "context_token": context_token,
+            "message_id": message_id,
+            "create_time_ms": create_time_ms,
+            "item_list": [{"type": 2}],
+        }
+    )
+
+
 def test_admin_and_invite_session_flow(db: Database) -> None:
     ilink_client = FakeIlinkClient()
     service = _make_service(db, ilink_client=ilink_client)
@@ -483,6 +502,82 @@ async def test_multitenant_poll_records_context_token_debug_log(db: Database, tm
     assert payload["previous_context_token"] == "ctx-old"
     assert payload["context_token"] == "ctx-new"
     assert payload["changed"] is True
+
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_multitenant_poll_traces_two_consecutive_images(
+    db: Database, tmp_path: Path
+) -> None:
+    ilink_client = FakeIlinkClient()
+    handler = AsyncMock(return_value="不会被调用")
+    service = _make_service(
+        db,
+        ilink_client=ilink_client,
+        handler=handler,
+        debug_log_path=tmp_path / "wechat_context_debug.jsonl",
+    )
+
+    tenant = await db.create_tenant("Tenant A")
+    link = await db.create_invite_link(tenant["tenant_id"])
+    session = await db.create_invite_session(
+        link_id=link["link_id"],
+        tenant_id=tenant["tenant_id"],
+        qrcode="qr-a",
+        qr_content="https://example.com/a.png",
+        ttl_seconds=90,
+    )
+    _, member, credential = await db.bind_invite_session(
+        session["invite_session_id"],
+        ilink_user_id="alice@im.wechat",
+        bot_token="token-1",
+        ilink_bot_id="bot-1",
+        default_base_url="https://ilinkai.weixin.qq.com",
+    )
+    ilink_client.updates_by_token["token-1"] = [
+        IlinkGetUpdatesResponse(
+            ret=0,
+            get_updates_buf="buf-1",
+            msgs=[
+                _make_image_message(
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-image-full-1",
+                    message_id="img-1",
+                    create_time_ms=101,
+                ),
+                _make_image_message(
+                    sender_id="alice@im.wechat",
+                    context_token="ctx-image-full-2",
+                    message_id="img-2",
+                    create_time_ms=102,
+                ),
+            ],
+        )
+    ]
+
+    processed = await service.manager.poll_credential_once(credential["credential_id"])
+
+    assert processed == 2
+    handler.assert_not_called()
+    assert [m["context_token"] for m in ilink_client.sent_messages] == [
+        "ctx-image-full-1",
+        "ctx-image-full-2",
+    ]
+
+    trace_lines = (tmp_path / "wechat_inbound_trace.jsonl").read_text(
+        encoding="utf-8"
+    ).strip().splitlines()
+    traces = [json.loads(line) for line in trace_lines]
+    notice_traces = [t for t in traces if t["stage"] == "non_text_notice_sent"]
+    assert [t["message_id"] for t in notice_traces] == ["img-1", "img-2"]
+    assert [t["context_token"] for t in notice_traces] == [
+        "ctx-image-full-1",
+        "ctx-image-full-2",
+    ]
+    assert all(t["item_types"] == [2] for t in notice_traces)
+    assert all(t["text"] == "[图片消息]" for t in notice_traces)
+    assert all(t["member_id"] == member["member_id"] for t in notice_traces)
 
     await service.stop()
 

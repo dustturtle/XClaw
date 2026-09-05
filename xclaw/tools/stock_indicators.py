@@ -16,6 +16,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class StockIndicatorsTool(Tool):
     """Calculate technical indicators for a stock using pandas-ta."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_indicators"

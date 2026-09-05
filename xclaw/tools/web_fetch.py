@@ -34,6 +34,8 @@ def _clean_html(html: str) -> str:
 class WebFetchTool(Tool):
     """Fetch the content of a URL and return cleaned text."""
 
+    read_only = True
+
     MAX_CHARS = 8000  # Limit returned text to avoid overflowing context
 
     @property

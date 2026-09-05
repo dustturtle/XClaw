@@ -388,19 +388,24 @@ async def test_sub_agent_empty_task():
 
 
 @pytest.mark.asyncio
-async def test_sub_agent_restricted_tools():
+async def test_sub_agent_restricted_tools(monkeypatch):
     """SubAgentTool should only include allowed tools in the sub-registry."""
-    from xclaw.tools.sub_agent import SubAgentTool, _ALLOWED_SUB_AGENT_TOOLS
+    from xclaw.tools.sub_agent import SubAgentTool
     from xclaw.tools.web_search import WebSearchTool
     from xclaw.tools.portfolio import PortfolioManageTool
 
     registry = ToolRegistry()
     registry.register(WebSearchTool())
-    registry.register(PortfolioManageTool())  # NOT in allowed set
+    registry.register(PortfolioManageTool())
 
     tool = SubAgentTool(registry)
-    # The tool should be registered without error
-    assert tool.name == "sub_agent"
-    # portfolio_manage should not be in allowed set
-    assert "portfolio_manage" not in _ALLOWED_SUB_AGENT_TOOLS
-    assert "web_search" in _ALLOWED_SUB_AGENT_TOOLS
+    async def child_loop(ctx, task, **kwargs):
+        assert {item.name for item in ctx.tools.all_tools()} == {"web_search"}
+        assert ctx.skip_session_persistence is True
+        return "child completed"
+
+    monkeypatch.setattr("xclaw.agent_engine.agent_loop", child_loop)
+    result = await tool.execute(
+        {"task": "read only"}, ToolContext(chat_id=1, channel="web", db=MagicMock(), llm=MagicMock()),
+    )
+    assert result.content == "child completed"

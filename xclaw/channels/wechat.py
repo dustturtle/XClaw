@@ -151,6 +151,7 @@ class WechatBotStatusPayload(BaseModel):
 
 
 _CONTEXT_DEBUG_LOCK = threading.Lock()
+_INBOUND_TRACE_LOCK = threading.Lock()
 
 
 def append_wechat_context_debug_record(
@@ -183,6 +184,29 @@ def append_wechat_context_debug_record(
     with _CONTEXT_DEBUG_LOCK:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def append_wechat_inbound_trace_record(
+    log_path: Path | None,
+    *,
+    stage: str,
+    scope: str,
+    **fields: Any,
+) -> None:
+    """Append a JSONL trace record for inbound iLink message handling."""
+    if log_path is None:
+        return
+    trace_path = log_path.with_name("wechat_inbound_trace.jsonl")
+    record = {
+        "ts": utc_now().isoformat(),
+        "stage": stage,
+        "scope": scope,
+        **fields,
+    }
+    with _INBOUND_TRACE_LOCK:
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with trace_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -282,6 +306,8 @@ class NormalizedWechatInbound(BaseModel):
     message_type: int | None = None
     timestamp_ms: int | None = None
     is_text: bool = True
+    raw_message_id: str | int | None = None
+    item_types: list[int | None] = Field(default_factory=list)
 
 
 def summarize_account(account: WechatAccount | None) -> WechatAccountSummary | None:
@@ -920,6 +946,8 @@ def normalize_polled_message(message: IlinkWireMessage) -> NormalizedWechatInbou
         message_type=message.message_type,
         timestamp_ms=message.create_time_ms,
         is_text=is_text,
+        raw_message_id=message.message_id,
+        item_types=[item.type for item in message.item_list],
     )
 
 

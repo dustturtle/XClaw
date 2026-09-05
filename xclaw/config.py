@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     thinking: bool | None = None
     max_tokens: int = 4096
     max_tool_iterations: int = 10
+
+    # PowerCore owns model/tool execution when selected; native remains explicit.
+    agent_backend: Literal["native", "powercore"] = "native"
+    powercore_base_url: str = "http://127.0.0.1:18080"
+    powercore_api_token: str = ""
+    powercore_tenant_id: str = "tenant_xclaw"
+    powercore_user_id: str = "user_xclaw"
+    powercore_mcp_token: str = ""
+    powercore_profile: Literal["mcp-readonly", "mcp-controlled"] = "mcp-controlled"
 
     # ── Web channel ──────────────────────────────────────────────────────────
     web_enabled: bool = True
@@ -232,6 +241,12 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
             loaded = yaml.safe_load(fh) or {}
         yaml_values = {k: v for k, v in loaded.items() if v is not None}
 
+    # BaseSettings gives constructor values priority over environment variables.
+    # Remove YAML overrides for explicitly supplied environment keys.
+    yaml_values = {
+        key: value for key, value in yaml_values.items()
+        if f"XCLAW_{key.upper()}" not in os.environ
+    }
     return Settings(**yaml_values)
 
 

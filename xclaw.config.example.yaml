@@ -12,6 +12,15 @@ thinking:                          # 可选，支持时启用深度思考模式
 max_tokens: 4096
 max_tool_iterations: 10
 
+# ── Harness 底座 ─────────────────────────────────────────────────────────────
+agent_backend: "native"           # native | powercore；选择后不自动回退到另一个底座
+powercore_base_url: "http://127.0.0.1:18080"
+powercore_api_token: ""            # 生产服务的 Bearer Token，建议用环境变量
+powercore_tenant_id: "tenant_xclaw"
+powercore_user_id: "user_xclaw"
+powercore_mcp_token: ""            # 必填的工具回调凭证，不能与用户 Web Token 混用
+powercore_profile: "mcp-controlled" # mcp-readonly 仅查询；mcp-controlled 支持用户自己的状态操作
+
 # ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
 # Web 界面（默认启用，绑定本地，不暴露公网）
 web_enabled: true

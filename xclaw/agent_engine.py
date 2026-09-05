@@ -52,6 +52,7 @@ class AgentContext:
         scheduler: Any = None,
         skip_session_persistence: bool = False,
         skip_message_persistence: bool = False,
+        powercore: Any = None,
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -64,6 +65,7 @@ class AgentContext:
         self.scheduler = scheduler
         self.skip_session_persistence = skip_session_persistence
         self.skip_message_persistence = skip_message_persistence
+        self.powercore = powercore
 
 
 def _build_system_prompt(
@@ -246,14 +248,19 @@ async def agent_loop(
     if _RESET_PATTERN.match(stripped_message):
         reply = "当前会话上下文已重置。后续消息将从干净上下文重新开始。"
         if not ctx.skip_session_persistence:
+            if ctx.powercore is not None:
+                await ctx.powercore.reset(ctx.chat_id)
             await ctx.db.clear_session(ctx.chat_id)
         if not ctx.skip_message_persistence:
             await ctx.db.save_message(ctx.chat_id, "user", user_message)
             await ctx.db.save_message(ctx.chat_id, "assistant", reply)
         return reply
 
+    if ctx.powercore is not None:
+        return await ctx.powercore.run(ctx, user_message, max_iterations=max_iterations)
+
     m = _MEMORY_PATTERN.match(stripped_message)
-    if m and ctx.structured_memory:
+    if m and ctx.structured_memory and not ctx.skip_message_persistence:
         fact = m.group(1).strip()
         await ctx.structured_memory.add(ctx.chat_id, fact)
         return f"已记住：{fact}"
@@ -300,6 +307,7 @@ async def agent_loop(
     final_text = ""
     consecutive_error_rounds = 0
     force_direct_answer = False
+    empty_reply_retried = False
     for iteration in range(_max_iter):
         _micro_compact(messages)
         try:
@@ -325,6 +333,24 @@ async def agent_loop(
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+        if force_direct_answer and response.tool_uses():
+            final_text = _EMPTY_REPLY_FALLBACK
+            messages.append(Message(role="assistant", content=final_text))
+            break
+
+        if not response.tool_uses() and not response.text().strip():
+            if not empty_reply_retried and iteration + 1 < _max_iter:
+                empty_reply_retried = True
+                force_direct_answer = True
+                messages.append(Message(
+                    role="user",
+                    content="上一轮没有返回正文。请根据已有信息给出最终答复，不要重复调用工具；信息不足时请明确说明。",
+                ))
+                continue
+            final_text = _EMPTY_REPLY_FALLBACK
+            messages.append(Message(role="assistant", content=final_text))
+            break
 
         if response.stop_reason == StopReason.end_turn:
             final_text = _normalize_final_text(response.text())

@@ -52,6 +52,12 @@
 
 ## 近期重大变更
 
+### 2026-09-05：PowerCore Harness 可选后端
+
+XClaw 可以保留现有渠道、业务工具和 SQLite 存储，通过 HTTP/SSE 接入独立 Rust PowerCore。
+后端选择为显式配置，不会在失败后自动回退到旧 Agent Loop。
+本地启动、只读/有状态权限边界和功能验收命令见 [PowerCore 接入说明](docs/powercore-integration.md)。
+
 ### 2026-03-27：A 股数据源重构（方案与验证基线完成）
 
 最近一次提交 `0cb4cd2` 新增了 [`datasource.md`](datasource.md)，把 XClaw 的 A 股数据源从“单一源思路”正式收敛为“按能力拆层 + 主备切换”的方案。这次变更的重点不是再往 README 里堆一个数据源名字，而是明确第一版在当前网络环境下应该怎么稳定落地。

@@ -10,6 +10,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class ReadMemoryTool(Tool):
     """Read the agent's AGENTS.md memory file for this chat."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "read_memory"
@@ -71,6 +73,8 @@ class WriteMemoryTool(Tool):
 
 class StructuredMemoryReadTool(Tool):
     """Query the structured memory (SQLite memories table)."""
+
+    read_only = True
 
     @property
     def name(self) -> str:
@@ -155,6 +159,8 @@ class StructuredMemoryUpdateTool(Tool):
 class SemanticMemorySearchTool(Tool):
     """Search memories by semantic similarity (character bi-gram cosine similarity)."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "semantic_memory_search"
@@ -206,4 +212,3 @@ class SemanticMemorySearchTool(Tool):
             score = r.get("score", 0.0)
             lines.append(f"({score:.2f}) {cat}{r['content']}")
         return ToolResult(content="\n".join(lines))
-

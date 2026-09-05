@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from xclaw.llm_types import ToolDefinition
@@ -39,6 +40,8 @@ class ToolContext:
         file_memory: Any = None,
         structured_memory: Any = None,
         scheduler: Any = None,
+        powercore: Any = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -48,10 +51,15 @@ class ToolContext:
         self.file_memory = file_memory
         self.structured_memory = structured_memory
         self.scheduler = scheduler
+        self.powercore = powercore
+        self.workspace_root = workspace_root
 
 
 class Tool(ABC):
     """Abstract base class for all XClaw tools."""
+
+    # A low risk level does not imply that an operation is read-only.
+    read_only: bool = False
 
     @property
     @abstractmethod

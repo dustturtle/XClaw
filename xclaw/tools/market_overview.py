@@ -11,6 +11,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class MarketOverviewTool(Tool):
     """Get major market indices and sector performance overview."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "market_overview"

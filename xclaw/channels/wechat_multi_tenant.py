@@ -27,6 +27,7 @@ from xclaw.channels.wechat import (
     IlinkClientError,
     QRStatusResponse,
     append_wechat_context_debug_record,
+    append_wechat_inbound_trace_record,
     normalize_polled_message,
     render_qr_svg,
     sanitize_reply_text,
@@ -714,6 +715,39 @@ class MultiTenantBotManager:
         task = self._tasks.get(credential_id)
         return task is not None and not task.done()
 
+    def _trace_message(
+        self,
+        stage: str,
+        *,
+        credential: ChannelCredentialRecord,
+        member: TenantMemberRecord,
+        message: Any,
+        **extra: Any,
+    ) -> None:
+        append_wechat_inbound_trace_record(
+            self.debug_log_path,
+            stage=stage,
+            scope="multi",
+            credential_id=credential.credential_id,
+            tenant_id=credential.tenant_id,
+            member_id=member.member_id,
+            bot_token=credential.bot_token,
+            ilink_bot_id=credential.ilink_bot_id,
+            base_url=credential.base_url,
+            ilink_user_id=member.ilink_user_id,
+            sender_id=message.sender_id,
+            message_id=message.message_id,
+            raw_message_id=message.raw_message_id,
+            text=message.text,
+            is_text=message.is_text,
+            context_token=message.context_token,
+            group_id=message.group_id,
+            message_type=message.message_type,
+            timestamp_ms=message.timestamp_ms,
+            item_types=message.item_types,
+            **extra,
+        )
+
     async def poll_credential_once(self, credential_id: str) -> int:
         credential_row = await self.db.get_credential(credential_id)
         if credential_row is None:
@@ -752,10 +786,67 @@ class MultiTenantBotManager:
 
         processed = 0
         for raw_message in response.msgs:
+            raw_item_types = [item.type for item in raw_message.item_list]
+            append_wechat_inbound_trace_record(
+                self.debug_log_path,
+                stage="polled",
+                scope="multi",
+                credential_id=credential.credential_id,
+                tenant_id=credential.tenant_id,
+                member_id=member.member_id,
+                bot_token=credential.bot_token,
+                ilink_bot_id=credential.ilink_bot_id,
+                base_url=credential.base_url,
+                ilink_user_id=member.ilink_user_id,
+                sender_id=raw_message.from_user_id,
+                raw_message_id=raw_message.message_id,
+                context_token=raw_message.context_token,
+                group_id=raw_message.group_id,
+                message_type=raw_message.message_type,
+                timestamp_ms=raw_message.create_time_ms,
+                item_types=raw_item_types,
+                raw_message=raw_message.model_dump(mode="json"),
+            )
             normalized = normalize_polled_message(raw_message)
-            if normalized is None or normalized.group_id:
+            if normalized is None:
+                append_wechat_inbound_trace_record(
+                    self.debug_log_path,
+                    stage="normalize_skipped",
+                    scope="multi",
+                    credential_id=credential.credential_id,
+                    tenant_id=credential.tenant_id,
+                    member_id=member.member_id,
+                    bot_token=credential.bot_token,
+                    ilink_bot_id=credential.ilink_bot_id,
+                    base_url=credential.base_url,
+                    ilink_user_id=member.ilink_user_id,
+                    sender_id=raw_message.from_user_id,
+                    raw_message_id=raw_message.message_id,
+                    context_token=raw_message.context_token,
+                    group_id=raw_message.group_id,
+                    message_type=raw_message.message_type,
+                    timestamp_ms=raw_message.create_time_ms,
+                    item_types=raw_item_types,
+                    raw_message=raw_message.model_dump(mode="json"),
+                )
+                continue
+            self._trace_message("normalized", credential=credential, member=member, message=normalized)
+            if normalized.group_id:
+                self._trace_message(
+                    "skipped_group",
+                    credential=credential,
+                    member=member,
+                    message=normalized,
+                )
                 continue
             if normalized.sender_id != member.ilink_user_id:
+                self._trace_message(
+                    "skipped_sender_mismatch",
+                    credential=credential,
+                    member=member,
+                    message=normalized,
+                    expected_sender_id=member.ilink_user_id,
+                )
                 continue
             handled = await self._handle_message(
                 credential=credential,
@@ -801,12 +892,31 @@ class MultiTenantBotManager:
         message: Any,
     ) -> bool:
         if await self.db.has_seen_message(credential.credential_id, message.message_id):
+            self._trace_message(
+                "dedup_duplicate",
+                credential=credential,
+                member=member,
+                message=message,
+            )
             return False
+        self._trace_message(
+            "dedup_checked",
+            credential=credential,
+            member=member,
+            message=message,
+            duplicate=False,
+        )
 
         await self.db.remember_message(
             tenant_id=credential.tenant_id,
             credential_id=credential.credential_id,
             message_id=message.message_id,
+        )
+        self._trace_message(
+            "dedup_recorded",
+            credential=credential,
+            member=member,
+            message=message,
         )
 
         if message.context_token:
@@ -825,6 +935,13 @@ class MultiTenantBotManager:
                 tenant_id=member.tenant_id,
                 context_token=message.context_token,
             )
+            self._trace_message(
+                "context_updated",
+                credential=credential,
+                member=member,
+                message=message,
+                previous_context_token=runtime.context_token,
+            )
 
         reply_context = message.context_token or runtime.context_token
         if not reply_context:
@@ -832,6 +949,12 @@ class MultiTenantBotManager:
                 member.member_id,
                 tenant_id=member.tenant_id,
                 last_error="Missing context_token for inbound message.",
+            )
+            self._trace_message(
+                "missing_context_token",
+                credential=credential,
+                member=member,
+                message=message,
             )
             return False
 
@@ -842,6 +965,14 @@ class MultiTenantBotManager:
                 message.sender_id,
                 UNSUPPORTED_PRIVATE_MESSAGE,
                 reply_context,
+            )
+            self._trace_message(
+                "non_text_notice_sent",
+                credential=credential,
+                member=member,
+                message=message,
+                reply_context=reply_context,
+                outbound_text=UNSUPPORTED_PRIVATE_MESSAGE,
             )
             return True
 
@@ -856,9 +987,31 @@ class MultiTenantBotManager:
 
         try:
             chat_id = build_member_chat_id(member.tenant_id, member.member_id)
+            self._trace_message(
+                "handler_started",
+                credential=credential,
+                member=member,
+                message=message,
+                chat_id=chat_id,
+            )
             reply = await self.message_handler(chat_id, message.text)
             reply = sanitize_reply_text(reply, max_chars=self.max_reply_chars)
+            self._trace_message(
+                "handler_finished",
+                credential=credential,
+                member=member,
+                message=message,
+                chat_id=chat_id,
+                reply=reply,
+            )
         except Exception as exc:  # noqa: BLE001
+            self._trace_message(
+                "handler_failed",
+                credential=credential,
+                member=member,
+                message=message,
+                error=str(exc),
+            )
             await self.db.update_runtime_state(
                 member.member_id,
                 tenant_id=member.tenant_id,
@@ -872,6 +1025,14 @@ class MultiTenantBotManager:
                     HANDLER_FAILURE_MESSAGE,
                     reply_context,
                 )
+                self._trace_message(
+                    "handler_failure_notice_sent",
+                    credential=credential,
+                    member=member,
+                    message=message,
+                    reply_context=reply_context,
+                    outbound_text=HANDLER_FAILURE_MESSAGE,
+                )
             except Exception as send_exc:  # noqa: BLE001
                 await self._finish_typing_indicator(typing_task, typing_context)
                 await self._clear_typing_indicator(credential, message, typing_context)
@@ -879,6 +1040,13 @@ class MultiTenantBotManager:
                     member.member_id,
                     tenant_id=member.tenant_id,
                     last_error=f"{exc}; send failure: {send_exc}",
+                )
+                self._trace_message(
+                    "handler_failure_notice_send_failed",
+                    credential=credential,
+                    member=member,
+                    message=message,
+                    error=str(send_exc),
                 )
                 return False
 
@@ -902,8 +1070,25 @@ class MultiTenantBotManager:
                 tenant_id=member.tenant_id,
                 last_error=str(exc),
             )
+            self._trace_message(
+                "reply_send_failed",
+                credential=credential,
+                member=member,
+                message=message,
+                reply=reply,
+                reply_context=reply_context,
+                error=str(exc),
+            )
             return False
 
+        self._trace_message(
+            "reply_sent",
+            credential=credential,
+            member=member,
+            message=message,
+            reply=reply,
+            reply_context=reply_context,
+        )
         await self._finish_typing_indicator(typing_task, typing_context)
         await self._clear_typing_indicator(credential, message, typing_context)
         await self.db.update_runtime_state(

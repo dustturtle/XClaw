@@ -10,6 +10,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class StockNewsTool(Tool):
     """Fetch latest news for a stock or the overall market."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_news"

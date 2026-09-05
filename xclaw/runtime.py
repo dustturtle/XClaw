@@ -98,6 +98,36 @@ async def run(settings: Settings) -> None:
         logger.info(f"MCP: loaded {len(mcp_clients)} server(s)")
 
     scheduler = None
+    powercore = None
+    if settings.agent_backend == "powercore":
+        from xclaw.powercore import PowerCoreClient
+
+        if not settings.web_enabled or not settings.powercore_mcp_token:
+            raise ValueError("PowerCore requires web_enabled and powercore_mcp_token")
+        powercore = PowerCoreClient(settings, db)
+        await powercore.check_ready()
+        logger.info("Agent backend: PowerCore Service API v1")
+
+    async def context_for_chat(chat_id: int) -> AgentContext:
+        chat = await db.get_chat(chat_id)
+        if chat is None:
+            raise ValueError("Chat does not exist")
+        return AgentContext(
+            chat_id=chat_id, channel=chat["channel"], db=db, llm=llm, tools=tools,
+            file_memory=file_memory, structured_memory=struct_memory,
+            settings=settings, scheduler=scheduler, powercore=powercore,
+        )
+
+    async def tool_context_for_chat(chat_id: int):
+        from xclaw.tools import ToolContext
+
+        ctx = await context_for_chat(chat_id)
+        return ToolContext(
+            chat_id=ctx.chat_id, channel=ctx.channel, db=db, llm=llm,
+            file_memory=file_memory, structured_memory=struct_memory,
+            settings=settings, scheduler=scheduler, powercore=powercore,
+            workspace_root=settings.groups_path / str(chat_id),
+        )
 
     # ── Build message handler ─────────────────────────────────────────────────
     async def handle_message(
@@ -106,18 +136,9 @@ async def run(settings: Settings) -> None:
         channel: str = "web",
         chat_type: str = "private",
     ) -> str:
-        chat_id = await db.get_or_create_chat(channel, external_chat_id, chat_type=chat_type)
-        ctx = AgentContext(
-            chat_id=chat_id,
-            channel=channel,
-            db=db,
-            llm=llm,
-            tools=tools,
-            file_memory=file_memory,
-            structured_memory=struct_memory,
-            settings=settings,
-            scheduler=scheduler,
-        )
+        chat_id = await resolve_message_chat(db, external_chat_id, channel, chat_type)
+        ctx = await context_for_chat(chat_id)
+        ctx.skip_session_persistence = channel == "scheduler"
         return await agent_loop(ctx, text)
 
     async def handle_message_stream(
@@ -306,6 +327,13 @@ async def run(settings: Settings) -> None:
             tool_registry=tools,
             oauth_manager=oauth_manager,
         )
+        if powercore is not None:
+            from xclaw.powercore_mcp import create_powercore_mcp_router
+
+            web_app.include_router(
+                create_powercore_mcp_router(tools, powercore, tool_context_for_chat),
+                prefix="/_powercore/mcp",
+            )
         # Register webhook adapters using isinstance checks for safety
         if settings.feishu_enabled:
             from xclaw.channels.feishu import FeishuAdapter
@@ -339,6 +367,8 @@ async def run(settings: Settings) -> None:
 
     # Cleanup
     scheduler.stop()
+    if powercore is not None:
+        await powercore.close()
     if wechat_multi_tenant is not None:
         await wechat_multi_tenant.stop()
     await db.close()
@@ -350,3 +380,15 @@ async def run(settings: Settings) -> None:
             await adapter.close()
     for client in mcp_clients:
         await client.close()
+
+
+async def resolve_message_chat(
+    db: Database, external_chat_id: str, channel: str, chat_type: str = "private",
+) -> int:
+    if channel == "scheduler":
+        # Scheduled tasks already carry the owning internal chat ID.
+        chat = await db.get_chat(int(external_chat_id))
+        if chat is None:
+            raise ValueError("Scheduled task chat does not exist")
+        return int(chat["id"])
+    return await db.get_or_create_chat(channel, external_chat_id, chat_type=chat_type)

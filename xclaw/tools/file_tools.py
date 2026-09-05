@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
-from xclaw.tools.path_guard import assert_path_safe
+from xclaw.tools.path_guard import resolve_tool_path
 
 
 class ReadFileTool(Tool):
     """Read the contents of a local file."""
+
+    read_only = True
 
     @property
     def name(self) -> str:
@@ -42,11 +43,11 @@ class ReadFileTool(Tool):
         if not path_str:
             return ToolResult(content="路径不能为空", is_error=True)
         try:
-            assert_path_safe(path_str)
+            path = resolve_tool_path(path_str, context.workspace_root)
         except PermissionError as exc:
             return ToolResult(content=str(exc), is_error=True)
         try:
-            content = Path(path_str).read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
             return ToolResult(content=content)
         except FileNotFoundError:
             return ToolResult(content=f"文件不存在: {path_str}", is_error=True)
@@ -92,11 +93,11 @@ class WriteFileTool(Tool):
         if not path_str:
             return ToolResult(content="路径不能为空", is_error=True)
         try:
-            assert_path_safe(path_str)
+            path = resolve_tool_path(path_str, context.workspace_root)
         except PermissionError as exc:
             return ToolResult(content=str(exc), is_error=True)
         try:
-            p = Path(path_str)
+            p = path
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             return ToolResult(content=f"成功写入 {path_str}（{len(content)} 字节）")

@@ -981,6 +981,7 @@ def create_web_app(
         if not isinstance(strategy_report_max_symbols, int):
             strategy_report_max_symbols = 10
         safe = {
+            "agent_backend": "powercore" if getattr(settings, "agent_backend", "native") == "powercore" else "native",
             "llm_provider": settings.llm_provider,
             "model": settings.model,
             "max_tokens": settings.max_tokens,

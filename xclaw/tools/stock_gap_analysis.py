@@ -21,6 +21,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class StockGapAnalysisTool(Tool):
     """Analyze daily price gaps using deterministic rules instead of LLM math."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_gap_analysis"

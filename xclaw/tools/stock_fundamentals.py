@@ -10,6 +10,8 @@ from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
 class StockFundamentalsTool(Tool):
     """Get fundamental financial data for a stock (revenue, profit, PE/PB/ROE)."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_fundamentals"

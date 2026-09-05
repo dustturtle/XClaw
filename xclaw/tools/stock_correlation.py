@@ -21,6 +21,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class StockCorrelationTool(Tool):
     """Analyze return correlations for multiple symbols."""
 
+    read_only = True
+
     @property
     def name(self) -> str:
         return "stock_correlation"

@@ -333,7 +333,8 @@ async def test_empty_end_turn_reply_uses_fallback(db: Database, tmp_path: Path):
         LLMResponse(
             stop_reason=StopReason.end_turn,
             content=[],
-        )
+        ),
+        LLMResponse(stop_reason=StopReason.end_turn, content=[TextBlock(text=" \n")]),
     ])
     ctx = AgentContext(
         chat_id=chat_id,
@@ -348,6 +349,43 @@ async def test_empty_end_turn_reply_uses_fallback(db: Database, tmp_path: Path):
     reply = await agent_loop(ctx, "测试空回复")
 
     assert reply == "抱歉，这一轮没有生成可展示的答复，请稍后重试。"
+    assert len(llm._calls) == 2
+    session = _messages_from_serializable(await db.load_session(chat_id))
+    assert session[-1].text_content() == reply
+    assert all(message.text_content().strip() for message in session if message.role == "assistant")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unexpected_tool", [False, True])
+async def test_empty_reply_after_tool_repairs_without_repeating_tool(db: Database, tmp_path: Path, unexpected_tool):
+    class CountingTool(Tool):
+        name = "counting"
+        description = "Return a known result"
+        parameters = {"type": "object", "properties": {}}
+
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, params, context):
+            self.calls += 1
+            return ToolResult("17 * 19 = 323")
+
+    tool = CountingTool()
+    llm = MockLLMProvider([
+        LLMResponse(stop_reason=StopReason.tool_use, content=[ToolUseBlock(id="calc", name=tool.name, input={})]),
+        LLMResponse(stop_reason=StopReason.end_turn, content=[]),
+        LLMResponse(stop_reason=StopReason.tool_use, content=[ToolUseBlock(id="repeat", name=tool.name, input={})])
+        if unexpected_tool else LLMResponse(stop_reason=StopReason.end_turn, content=[TextBlock(text="结果是 323。")]),
+    ])
+    ctx = _make_agent_ctx(db, llm, tmp_path)
+    ctx.tools.register(tool)
+
+    expected = "抱歉，这一轮没有生成可展示的答复，请稍后重试。" if unexpected_tool else "结果是 323。"
+    assert await agent_loop(ctx, "计算 17 * 19") == expected
+    assert tool.calls == 1
+    assert llm._calls[-1]["tools"] is None
+    session = _messages_from_serializable(await db.load_session(ctx.chat_id))
+    assert not any(message.role == "assistant" and message.content == [] for message in session)
 
 
 @pytest.mark.asyncio

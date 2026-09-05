@@ -16,6 +16,8 @@ from xclaw.tools.market_symbols import normalize_hk_yf_symbol
 class StockQuoteTool(Tool):
     """Fetch current stock quote (price, change, volume)."""
 
+    read_only = True
+
     _CN_HTTP_TIMEOUT_SECONDS = 3.0
     _BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0"}
     _SINA_HEADERS = {

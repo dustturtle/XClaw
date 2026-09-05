@@ -12,27 +12,6 @@ from typing import Any
 
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolRegistry, ToolResult
 
-# Names of tools the sub-agent is allowed to use
-_ALLOWED_SUB_AGENT_TOOLS: frozenset[str] = frozenset(
-    {
-        "web_search",
-        "web_fetch",
-        "stock_quote",
-        "stock_correlation",
-        "earnings_analysis",
-        "etf_premium_analysis",
-        "stock_liquidity",
-        "stock_gap_analysis",
-        "stock_history",
-        "stock_indicators",
-        "stock_fundamentals",
-        "stock_news",
-        "market_overview",
-        "read_file",
-        "structured_memory_read",
-    }
-)
-
 
 class SubAgentTool(Tool):
     """Delegate a sub-task to a nested agent with a restricted tool set.
@@ -83,12 +62,12 @@ class SubAgentTool(Tool):
         if not task:
             return ToolResult(content="task 不能为空", is_error=True)
 
-        max_iter = min(int(params.get("max_iterations", 5)), 5)
+        max_iter = max(1, min(int(params.get("max_iterations", 5)), 5))
 
         # Build a restricted registry from the parent's tools
         sub_registry = ToolRegistry()
         for tool in self._parent_registry.all_tools():
-            if tool.name in _ALLOWED_SUB_AGENT_TOOLS:
+            if tool.read_only and tool.risk_level != RiskLevel.HIGH:
                 try:
                     sub_registry.register(tool)
                 except ValueError:
@@ -117,6 +96,7 @@ class SubAgentTool(Tool):
             settings=context.settings,
             skip_session_persistence=True,
             skip_message_persistence=True,
+            powercore=context.powercore,
         )
 
         try:
