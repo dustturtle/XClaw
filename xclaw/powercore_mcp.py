@@ -70,7 +70,7 @@ def create_powercore_mcp_router(registry: Any, backend: Any, context_factory: An
                 if binding and binding["status"] != "waiting_input":
                     break
                 await asyncio.sleep(0.05)
-            if not binding or binding["status"] not in {"queued", "running"}:
+            if not binding or binding["status"] not in {"queued", "running"} or binding.get("cancel_requested"):
                 return _jsonrpc_error(req_id, -32001, "Run is not active or not bound")
             name = params.get("name")
             arguments = params.get("arguments", {})

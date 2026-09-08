@@ -53,7 +53,7 @@ async def test_chat_uses_powercore_session_after_client_restart(db):
             assert "idempotency_key" in json.loads(request.content)
             assert json.loads(request.content)["max_turns"] == settings.max_tool_iterations
             return httpx.Response(202, json={
-                "schema_version": 1, "run_id": f"run_turn{turns}", "session_id": "session_test",
+                "schema_version": 1, "run_id": f"run_turn{turns}", "session_id": "session_test", "wall_time_ms": 600000,
             })
         return sse(event(1, "run.started", run_id=f"run_turn{turns}", model="glm"), event(2, "usage", run_id=f"run_turn{turns}", usage={
             "input_tokens": 10, "output_tokens": 2,
@@ -84,7 +84,12 @@ async def test_input_required_resumes_the_same_run(db):
         requests.append(request)
         if request.method == "POST":
             return httpx.Response(202, json={
-                "schema_version": 1, "run_id": "run_test", "session_id": "session_test",
+                "schema_version": 1, "run_id": "run_test", "session_id": "session_test", "wall_time_ms": 600000,
+            })
+        if request.url.path == "/runs/run_test":
+            return httpx.Response(200, json={
+                "schema_version": 1, "run_id": "run_test", "status": "waiting_input",
+                "waiting_for_input": "input_test",
             })
         reads += 1
         if reads == 1:
@@ -97,8 +102,9 @@ async def test_input_required_resumes_the_same_run(db):
     ctx = await context(db, backend)
     assert await agent_loop(ctx, "开始") == "你的偏好是什么？"
     assert await agent_loop(ctx, "低风险") == "已了解偏好。"
-    assert requests[2].url.path == "/runs/run_test/input"
-    assert json.loads(requests[2].content)["value"] == {"answer": "低风险"}
+    assert requests[2].method == "GET" and requests[2].url.path == "/runs/run_test"
+    assert requests[3].url.path == "/runs/run_test/input"
+    assert json.loads(requests[3].content)["value"] == {"answer": "低风险"}
     await backend.close()
 
 
@@ -110,7 +116,7 @@ async def test_quick_memory_command_cannot_bypass_readonly_harness(db):
         requests.append(request)
         if request.method == "POST":
             assert json.loads(request.content)["profile"] == "mcp-readonly"
-            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test"})
+            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test", "wall_time_ms": 600000})
         return sse(event(1, "run.completed", response="本次只能读取，未修改记忆。"))
 
     backend = PowerCoreClient(Settings(powercore_profile="mcp-readonly"), db, transport=httpx.MockTransport(server))
@@ -129,7 +135,7 @@ async def test_quick_memory_command_cannot_bypass_readonly_harness(db):
 async def test_empty_or_failed_response_is_not_saved_as_success(db, terminal):
     def server(request):
         if request.method == "POST":
-            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test"})
+            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test", "wall_time_ms": 600000})
         return sse(terminal)
 
     backend = PowerCoreClient(Settings(), db, transport=httpx.MockTransport(server))
@@ -149,7 +155,7 @@ async def test_sse_reconnect_uses_cursor_and_does_not_double_record_usage(db):
 
     def server(request):
         if request.method == "POST":
-            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test"})
+            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_test", "session_id": "session_test", "wall_time_ms": 600000})
         calls.append(request.headers["Last-Event-ID"])
         if len(calls) == 1:
             return sse(usage)
@@ -250,7 +256,7 @@ async def test_background_run_does_not_answer_or_replace_foreground_question(db)
             assert request.url.path == "/runs"
             assert json.loads(request.content)["profile"] == "mcp-controlled"
             return httpx.Response(202, json={
-                "schema_version": 1, "run_id": "run_test", "session_id": "session_background",
+                "schema_version": 1, "run_id": "run_test", "session_id": "session_background", "wall_time_ms": 600000,
             })
         return sse(event(1, "run.completed", response="定时任务完成。"))
 
@@ -276,7 +282,7 @@ async def test_background_failure_or_question_is_not_reported_as_success(db, kin
     def server(request):
         if request.method == "POST":
             return httpx.Response(202, json={
-                "schema_version": 1, "run_id": "run_test", "session_id": "session_test",
+                "schema_version": 1, "run_id": "run_test", "session_id": "session_test", "wall_time_ms": 600000,
             })
         return sse(event(1, kind, prompt="请补充参数", error={"code": "provider_protocol"}))
 
@@ -286,7 +292,12 @@ async def test_background_failure_or_question_is_not_reported_as_success(db, kin
     with pytest.raises(PowerCoreError):
         await agent_loop(ctx, "后台任务")
     assert all(message["role"] != "assistant" for message in await db.get_recent_messages(ctx.chat_id))
-    assert (await db.get_powercore_run("run_test"))["status"] in {"failed", "cancelled"}
+    state = await db.get_powercore_run("run_test")
+    if kind == "input_required":
+        assert state["status"] == "waiting_input"
+        assert state["cancel_requested"] == 1
+    else:
+        assert state["status"] == "failed"
     await backend.close()
 
 

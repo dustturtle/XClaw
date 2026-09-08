@@ -145,7 +145,7 @@ async def test_powercore_forwards_image_blocks_and_does_not_store_base64_in_chat
     def server(request):
         requests.append(request)
         if request.method == "POST":
-            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_image", "session_id": "session_image"})
+            return httpx.Response(202, json={"schema_version": 1, "run_id": "run_image", "session_id": "session_image", "wall_time_ms": 600000})
         return httpx.Response(200, text='data: {"schema_version":1,"sequence":1,"run_id":"run_image","type":"run.completed","response":"蓝色"}\n\n')
 
     backend = PowerCoreClient(Settings(), db, transport=httpx.MockTransport(server))

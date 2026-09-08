@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from xclaw.oauth import AuthProfileStore, OpenAICodexOAuthManager
 from xclaw.skills import build_skill_registry
 from xclaw.tools import ToolRegistry
 from xclaw.tools.sub_agent import SubAgentTool
+from xclaw.lifecycle import LifecycleJournal, exception_fields
 
 def _setup_logging(settings: Settings) -> None:
     settings.logs_path.mkdir(parents=True, exist_ok=True)
@@ -52,6 +54,35 @@ def _build_tool_registry(settings: Settings) -> ToolRegistry:
 
 
 async def run(settings: Settings) -> None:
+    journal = LifecycleJournal(settings.logs_path, "runtime")
+    journal.emit("runtime_started")
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+
+    def exception_handler(_loop, context):
+        error = context.get("exception")
+        journal.emit("async_exception", **exception_fields(error) if error else {"exception_type": "AsyncFailure"})
+
+    loop.set_exception_handler(exception_handler)
+    crash_log = (settings.logs_path / ("fatal-" + journal.boot_id + ".log")).open("a")
+    fatal_was_enabled = faulthandler.is_enabled()
+    faulthandler.enable(crash_log, all_threads=True)
+    try:
+        await _run(settings)
+    except BaseException as exc:
+        journal.emit("runtime_exception", **exception_fields(exc))
+        raise
+    finally:
+        loop.set_exception_handler(previous_handler)
+        if fatal_was_enabled:
+            faulthandler.enable()
+        else:
+            faulthandler.disable()
+        crash_log.close()
+        journal.emit("runtime_stopped")
+
+
+async def _run(settings: Settings) -> None:
     """Start the XClaw runtime."""
     _setup_logging(settings)
     logger.info("Starting XClaw runtime…")
@@ -136,10 +167,14 @@ async def run(settings: Settings) -> None:
         text: str,
         channel: str = "web",
         chat_type: str = "private",
-        *, attachments: list[ImageAttachment] | None = None,
+        *, attachments: list[ImageAttachment] | None = None, execution_mode: str | None = None,
     ) -> str:
         chat_id = await resolve_message_chat(db, external_chat_id, channel, chat_type)
         ctx = await context_for_chat(chat_id)
+        if execution_mode is not None:
+            if execution_mode not in {"standard", "analysis"}:
+                raise ValueError("Unsupported execution mode")
+            ctx.execution_mode = execution_mode
         ctx.skip_session_persistence = channel == "scheduler"
         return await agent_loop(ctx, text, attachments=attachments)
 
@@ -148,9 +183,9 @@ async def run(settings: Settings) -> None:
         text: str,
         channel: str = "web",
         chat_type: str = "private",
-        *, attachments: list[ImageAttachment] | None = None,
+        *, attachments: list[ImageAttachment] | None = None, execution_mode: str | None = None,
     ):
-        reply = await handle_message(external_chat_id, text, channel, chat_type, attachments=attachments)
+        reply = await handle_message(external_chat_id, text, channel, chat_type, attachments=attachments, execution_mode=execution_mode)
         if not reply:
             return
         chunk_size = 120
@@ -315,14 +350,44 @@ async def run(settings: Settings) -> None:
         await wechat_multi_tenant.start()
     scheduler.start()
 
+    async def cleanup():
+        scheduler.stop()
+        try:
+            if powercore is not None:
+                await powercore.close()
+            if wechat_multi_tenant is not None:
+                await wechat_multi_tenant.stop()
+            if oauth_manager is not None:
+                await oauth_manager.close()
+            for adapter in adapters:
+                await adapter.stop()
+                if hasattr(adapter, "close"):
+                    await adapter.close()
+            for client in mcp_clients:
+                await client.close()
+        finally:
+            await db.close()
+
     # ── Web server ────────────────────────────────────────────────────────────
     if settings.web_enabled:
         from xclaw.channels.web import create_web_app
+
+        async def handle_progress(external_chat_id: str, include_history: bool = False):
+            chat_id = await resolve_message_chat(db, external_chat_id, "web", "private")
+            return await powercore.progress(await context_for_chat(chat_id), include_history=include_history)
+
+        async def handle_cancel(external_chat_id: str, run_id: str):
+            chat_id = await resolve_message_chat(db, external_chat_id, "web", "private")
+            return await powercore.cancel_run(chat_id, run_id)
 
         web_app = create_web_app(
             message_handler=lambda cid, text, **options: handle_message(cid, text, "web", **options),
             stream_handler=lambda cid, text, **options: handle_message_stream(cid, text, "web", **options),
             supports_images=powercore is not None,
+            progress_handler=handle_progress if powercore else None,
+            cancel_handler=handle_cancel if powercore else None,
+            startup_handler=(lambda: powercore.restore_background(context_for_chat)) if powercore else None,
+            readiness_handler=powercore.check_ready if powercore else None,
             auth_token=settings.web_auth_token,
             rate_limit=settings.rate_limit_per_minute,
             db=db,
@@ -367,23 +432,12 @@ async def run(settings: Settings) -> None:
         )
         server = uvicorn.Server(config)
         logger.info(f"Web server starting on {settings.web_host}:{settings.web_port}")
-        await server.serve()
-
-    # Cleanup
-    scheduler.stop()
-    if powercore is not None:
-        await powercore.close()
-    if wechat_multi_tenant is not None:
-        await wechat_multi_tenant.stop()
-    await db.close()
-    if oauth_manager is not None:
-        await oauth_manager.close()
-    for adapter in adapters:
-        await adapter.stop()
-        if hasattr(adapter, "close"):
-            await adapter.close()
-    for client in mcp_clients:
-        await client.close()
+        try:
+            await server.serve()
+        finally:
+            await cleanup()
+    else:
+        await cleanup()
 
 
 async def resolve_message_chat(

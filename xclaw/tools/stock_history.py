@@ -20,6 +20,8 @@ class StockHistoryTool(Tool):
     """Fetch historical candlestick (OHLCV) data for a stock."""
 
     read_only = True
+    # CN history returns isolated snapshots; other paths use per-call frames.
+    independent = True
 
     @property
     def name(self) -> str:
@@ -164,12 +166,18 @@ class StockHistoryTool(Tool):
             return ToolResult(content=f"未找到 {symbol} 的历史数据", is_error=True)
         # Compute derived metrics on full DataFrame before truncating
         source = df.attrs.get("source", "unknown")
+        snapshot_lines = []
+        if df.attrs.get("data_as_of"):
+            snapshot_lines.append(f"数据截至: {df.attrs['data_as_of']}")
+        if df.attrs.get("fetched_at"):
+            snapshot_lines.append(f"获取时间: {df.attrs['fetched_at']}")
         prev_close = df["收盘"].shift(1)
         df["涨跌幅"] = (df["收盘"] - prev_close) / prev_close * 100
         df["振幅"] = (df["最高"] - df["最低"]) / prev_close * 100
         df = df.tail(limit)
         lines = [
             f"数据源: {source}",
+            *snapshot_lines,
             f"{'日期':<12} {'开盘':>8} {'收盘':>8} {'最高':>8} {'最低':>8} {'涨跌幅':>8} {'振幅':>8} {'成交量':>12}",
         ]
         for _, row in df.iterrows():

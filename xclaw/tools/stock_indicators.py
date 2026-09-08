@@ -17,6 +17,8 @@ class StockIndicatorsTool(Tool):
     """Calculate technical indicators for a stock using pandas-ta."""
 
     read_only = True
+    # Indicators only read their per-call frame and do not persist artifacts.
+    independent = True
 
     @property
     def name(self) -> str:
@@ -135,6 +137,10 @@ class StockIndicatorsTool(Tool):
         lines = [f"=== {symbol} 技术指标分析 ==="]
         if source:
             lines.append(f"历史数据源: {source}")
+        if df.attrs.get("data_as_of"):
+            lines.append(f"数据截至: {df.attrs['data_as_of']}")
+        if df.attrs.get("fetched_at"):
+            lines.append(f"获取时间: {df.attrs['fetched_at']}")
         latest_close = float(close.iloc[-1]) if close is not None else None
         if latest_close:
             lines.append(f"最新收盘价: {latest_close:.2f}")

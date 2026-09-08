@@ -60,6 +60,9 @@ class Tool(ABC):
 
     # A low risk level does not imply that an operation is read-only.
     read_only: bool = False
+    # Explicit opt-in after reviewing ALL execution paths for shared state and
+    # side effects. Read-only alone never implies safe independent execution.
+    independent: bool = False
 
     @property
     @abstractmethod

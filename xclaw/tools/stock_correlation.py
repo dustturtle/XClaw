@@ -22,6 +22,8 @@ class StockCorrelationTool(Tool):
     """Analyze return correlations for multiple symbols."""
 
     read_only = True
+    # visualize=True writes files and uses shared matplotlib state.
+    independent = False
 
     @property
     def name(self) -> str:

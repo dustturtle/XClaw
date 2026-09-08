@@ -64,6 +64,9 @@ xclaw = "xclaw.cli:main"
 where = ["."]
 include = ["xclaw*"]
 
+[tool.setuptools.package-data]
+"xclaw.channels" = ["static/*.css", "static/*.js", "static/*.txt"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

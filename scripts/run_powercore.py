@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import secrets
@@ -26,13 +27,81 @@ sys.path.insert(0, str(ROOT))
 from xclaw.config import load_settings
 from xclaw.powercore import mcp_catalog
 from xclaw.runtime import _build_tool_registry, run
+from xclaw.lifecycle import LifecycleJournal, exception_fields
+
+
+_journal = None
+
+
+def runtime_child(settings):
+    os.setsid()
+    try:
+        asyncio.run(run(settings))
+    except KeyboardInterrupt:
+        pass
+    except BaseException:
+        # run() already journals redacted frames; multiprocessing's default
+        # exception printer would also dump potentially sensitive error text.
+        raise SystemExit(1) from None
+
+
+def monitor_runtime(process, children, journal, web_port):
+    """Observe a child from outside it, so SIGKILL still produces an exit record."""
+    previous_health = None
+    reported = set()
+    next_health = 0.0
+    with httpx.Client(timeout=4, trust_env=False) as client:
+        while process.is_alive():
+            for name, child in zip(("server", "worker"), children):
+                code = child.poll()
+                if code is not None and name not in reported:
+                    journal.emit("child_exited", component=name, child_pid=child.pid,
+                                 exit_code=code, signal=-code if code < 0 else None)
+                    reported.add(name)
+            if time.monotonic() >= next_health:
+                try:
+                    healthy = client.get(f"http://127.0.0.1:{web_port}/health/ready").status_code == 200
+                except httpx.HTTPError:
+                    healthy = False
+                if healthy != previous_health:
+                    journal.emit("health_changed", component="web", healthy=healthy)
+                    previous_health = healthy
+                next_health = time.monotonic() + 10
+            process.join(timeout=0.5)
+    code = process.exitcode
+    journal.emit("child_exited", component="runtime", child_pid=process.pid,
+                 exit_code=code, signal=-code if code is not None and code < 0 else None)
+    return code
 
 
 def checked(command, **kwargs):
     return subprocess.run(command, check=True, **kwargs)
 
 
+def powercore_config_text(settings, state: Path, port: int) -> str:
+    base_url = settings.base_url or {
+        "openai": "https://api.openai.com/v1", "deepseek": "https://api.deepseek.com/v1",
+        "ollama": "http://127.0.0.1:11434/v1",
+    }[settings.llm_provider]
+    wall_time_ms = int(settings.powercore_run_timeout * 1000)
+    return "\n".join([
+        "[model]", 'provider = "openai_compatible"', f"base_url = {json.dumps(base_url)}",
+        f"model = {json.dumps(settings.model)}", f"timeout_seconds = {int(settings.powercore_model_timeout)}",
+        f"max_tokens = {settings.max_tokens}",
+        *([f"temperature = {settings.temperature}"] if settings.temperature is not None else []),
+        *([f"thinking = {str(settings.thinking).lower()}"] if settings.thinking is not None else []),
+        "[server]", f'bind = "127.0.0.1:{port}"',
+        f"runtime_root = {json.dumps(str(state / 'runtime'))}",
+        "development_auth = true", "fixtures_enabled = false",
+        f"run_default_wall_time_ms = {wall_time_ms}", f"run_max_wall_time_ms = {wall_time_ms}",
+        f"run_finalization_reserve_ms = {min(int(settings.powercore_finalization_reserve * 1000), wall_time_ms)}",
+        "[worker]", f"runtime_root = {json.dumps(str(state / 'runtime'))}",
+        "concurrency = 4", "[tasks]", "enabled = false", "",
+    ])
+
+
 def main():
+    global _journal
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "xclaw.config.yaml"))
     parser.add_argument("--powercore-dir", type=Path, default=ROOT.parent / "PowerCore")
@@ -63,6 +132,8 @@ def main():
     settings = settings.model_copy(update=updates)
     state = settings.data_path.resolve() / "powercore"
     state.mkdir(parents=True, exist_ok=True)
+    _journal = LifecycleJournal(settings.logs_path, "launcher")
+    _journal.emit("launcher_started")
     environment = os.environ.copy()
     if (core / ".cache/cargo/bin/cargo").exists():
         environment.update({
@@ -107,23 +178,8 @@ def main():
         registry, settings, f"http://127.0.0.1:{args.web_port}/_powercore/mcp",
     ), encoding="utf-8")
     catalog_path.chmod(0o600)
-    base_url = settings.base_url or {
-        "openai": "https://api.openai.com/v1", "deepseek": "https://api.deepseek.com/v1",
-        "ollama": "http://127.0.0.1:11434/v1",
-    }[settings.llm_provider]
     config_path = state / "powercore.toml"
-    config_path.write_text("\n".join([
-        "[model]", 'provider = "openai_compatible"', f"base_url = {json.dumps(base_url)}",
-        f"model = {json.dumps(settings.model)}", f"timeout_seconds = {int(settings.timeout)}",
-        f"max_tokens = {settings.max_tokens}",
-        *([f"temperature = {settings.temperature}"] if settings.temperature is not None else []),
-        *([f"thinking = {str(settings.thinking).lower()}"] if settings.thinking is not None else []),
-        "[server]", f'bind = "127.0.0.1:{args.powercore_port}"',
-        f"runtime_root = {json.dumps(str(state / 'runtime'))}",
-        "development_auth = true", "fixtures_enabled = false",
-        "[worker]", f"runtime_root = {json.dumps(str(state / 'runtime'))}",
-        "concurrency = 4", "[tasks]", "enabled = false", "",
-    ]), encoding="utf-8")
+    config_path.write_text(powercore_config_text(settings, state, args.powercore_port), encoding="utf-8")
     environment.update({
         "PC_CONFIG": str(config_path), "PC_ENV": "dev",
         "PC_DATABASE_URL": f"postgresql://powercore@127.0.0.1:{args.postgres_port}/powercore",
@@ -133,6 +189,15 @@ def main():
         "XCLAW_POWERCORE_MCP_AUTHORIZATION": "Bearer " + settings.powercore_mcp_token,
     })
     children = []
+    runtime_process = None
+    previous_signals = {}
+
+    def shutdown_signal(signum, _frame):
+        _journal.emit("signal_received", signal=signum)
+        raise KeyboardInterrupt
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_signals[signum] = signal.signal(signum, shutdown_signal)
     try:
         for name in ("server", "worker"):
             with (state / f"{name}.log").open("ab") as log:
@@ -140,6 +205,7 @@ def main():
                     [str(core / "target/debug" / f"powercore-{name}")],
                     cwd=core, env=environment, stdout=log, stderr=log, start_new_session=True,
                 ))
+                _journal.emit("child_started", component=name, child_pid=children[-1].pid)
         with httpx.Client(timeout=1, trust_env=False) as client:
             for _ in range(100):
                 if any(child.poll() is not None for child in children):
@@ -154,10 +220,24 @@ def main():
             else:
                 raise SystemExit(f"PowerCore did not become ready; see {state}")
         print(f"PowerCore: {settings.powercore_base_url}; XClaw: http://127.0.0.1:{args.web_port}", flush=True)
-        asyncio.run(run(settings))
+        runtime_process = multiprocessing.get_context("spawn").Process(target=runtime_child, args=(settings,))
+        runtime_process.start()
+        _journal.emit("child_started", component="runtime", child_pid=runtime_process.pid)
+        code = monitor_runtime(runtime_process, children, _journal, args.web_port)
+        if code:
+            raise SystemExit(code if code > 0 else 128 - code)
     except KeyboardInterrupt:
         pass
     finally:
+        if runtime_process is not None:
+            if runtime_process.is_alive():
+                os.kill(runtime_process.pid, signal.SIGINT)
+                runtime_process.join(timeout=15)
+                if runtime_process.is_alive():
+                    runtime_process.kill()
+                    runtime_process.join(timeout=5)
+            _journal.emit("child_stopped", component="runtime", child_pid=runtime_process.pid,
+                          exit_code=runtime_process.exitcode)
         for child in children:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGTERM)
@@ -167,8 +247,25 @@ def main():
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
+            _journal.emit("child_stopped", child_pid=child.pid, exit_code=child.returncode)
+        for signum, previous in previous_signals.items():
+            signal.signal(signum, previous)
         print(f"PowerCore stopped. PostgreSQL data is retained in Docker volume {container}.", flush=True)
 
 
+def entrypoint():
+    try:
+        main()
+    except BaseException as exc:
+        if _journal:
+            _journal.emit("launcher_exception", **exception_fields(exc))
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        raise SystemExit(1) from None
+    finally:
+        if _journal:
+            _journal.emit("launcher_stopped")
+
+
 if __name__ == "__main__":
-    main()
+    entrypoint()

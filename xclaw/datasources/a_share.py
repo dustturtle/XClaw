@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any
 
@@ -13,10 +13,18 @@ import httpx
 from loguru import logger
 import pandas as pd
 
+from xclaw.datasources._history_requests import (
+    HistoryProviderPool,
+    HistoryRequestCache,
+    ProviderUnavailable,
+)
 
 _CN_HTTP_TIMEOUT_SECONDS = 3.0
-_PROVIDER_TIMEOUT_SECONDS = 15.0
+_PROVIDER_TIMEOUT_SECONDS = 3.0
+_HISTORY_TOTAL_TIMEOUT_SECONDS = 10.0
 _BAOSTOCK_LOCK_TIMEOUT_SECONDS = 20.0
+_HISTORY_CACHE = HistoryRequestCache()
+_HISTORY_PROVIDERS = HistoryProviderPool(("pytdx", "baostock", "yfinance", "akshare"))
 _BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 _TDX_SERVERS = (
     ("218.75.126.9", 7709),
@@ -36,6 +44,10 @@ _INDEX_BARE_TO_PREFIXED: dict[str, str] = {
     code[2:]: code for _, code in _INDEX_CODES
 }
 _BAOSTOCK_LOCK = threading.Lock()
+
+
+class _NoHistoryData(ValueError):
+    """A valid but empty response is not a source-wide health failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +99,20 @@ async def fetch_cn_history_dataframe(
     end_date: str,
 ) -> pd.DataFrame:
     normalized = normalize_cn_symbol(symbol)
+    period = period if period in {"daily", "weekly", "monthly"} else "daily"
+    start_date = datetime.strptime(_to_ymd(start_date), "%Y-%m-%d").strftime("%Y-%m-%d")
+    end_date = datetime.strptime(_to_ymd(end_date), "%Y-%m-%d").strftime("%Y-%m-%d")
+    if start_date > end_date:
+        raise ValueError("start_date must not be after end_date")
+    key = (normalized.prefixed_code, period, start_date, end_date)
+    return await _HISTORY_CACHE.get(
+        key, lambda: _fetch_cn_history_uncached(normalized, period, start_date, end_date),
+    )
+
+
+async def _fetch_cn_history_uncached(normalized, period, start_date, end_date) -> pd.DataFrame:
     loop = asyncio.get_running_loop()
+    deadline = loop.time() + _HISTORY_TOTAL_TIMEOUT_SECONDS
     providers = (
         ("pytdx", lambda: _history_from_pytdx(normalized, period, start_date, end_date)),
         ("baostock", lambda: _history_from_baostock(normalized, period, start_date, end_date)),
@@ -96,29 +121,53 @@ async def fetch_cn_history_dataframe(
     )
     errors: list[str] = []
     for source, producer in providers:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            errors.append("history total budget exhausted")
+            break
         try:
-            df = await asyncio.wait_for(
-                loop.run_in_executor(None, producer),
-                timeout=_PROVIDER_TIMEOUT_SECONDS,
+            normalized_df = await _HISTORY_PROVIDERS.run(
+                source,
+                lambda producer=producer, source=source: _history_snapshot(producer, source),
+                timeout=min(_PROVIDER_TIMEOUT_SECONDS, remaining),
             )
+        except ProviderUnavailable as exc:
+            errors.append(f"{source}: {exc}")
+            continue
+        except _NoHistoryData:
+            errors.append(f"{source}: no data")
+            continue
         except asyncio.TimeoutError:
-            logger.warning(f"A-share history provider {source} timed out after {_PROVIDER_TIMEOUT_SECONDS}s")
+            _HISTORY_PROVIDERS.failed(source)
+            logger.warning(f"A-share history provider {source} timed out")
             errors.append(f"{source}: timeout")
             continue
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"A-share history provider {source} failed: {exc}")
-            errors.append(f"{source}: {exc}")
+            _HISTORY_PROVIDERS.failed(source)
+            logger.warning(f"A-share history provider {source} failed: {type(exc).__name__}")
+            errors.append(f"{source}: {type(exc).__name__}")
             continue
-        if df is None or df.empty:
-            errors.append(f"{source}: no data")
-            continue
-        normalized_df = _normalize_history_frame(df)
-        if normalized_df.empty:
-            errors.append(f"{source}: invalid data")
-            continue
-        normalized_df.attrs["source"] = source
+        if loop.time() >= deadline:
+            errors.append("history total budget exhausted")
+            break
         return normalized_df
+    if loop.time() >= deadline and "history total budget exhausted" not in errors:
+        errors.append("history total budget exhausted")
     raise RuntimeError(" / ".join(errors))
+
+
+def _history_snapshot(producer, source) -> pd.DataFrame:
+    df = producer()
+    if df is None or df.empty:
+        raise _NoHistoryData()
+    normalized = _normalize_history_frame(df)
+    if normalized.empty:
+        raise ValueError("invalid history data")
+    normalized.attrs["source"] = source
+    # Retrieval time is not the market timestamp; cache hits preserve both.
+    normalized.attrs["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    normalized.attrs["data_as_of"] = str(normalized["日期"].iloc[-1])
+    return normalized
 
 
 async def fetch_cn_index_quotes() -> list[dict[str, str]]:
@@ -263,6 +312,7 @@ def _history_from_pytdx(
     count = _estimate_bar_count(start_date, end_date, period)
     api = TdxHq_API()
     errors: list[str] = []
+    empty_response = False
     for host, port in _TDX_SERVERS:
         try:
             if not api.connect(host, port, time_out=5):
@@ -270,6 +320,7 @@ def _history_from_pytdx(
                 continue
             raw = api.get_security_bars(category, normalized.tdx_market, normalized.code, 0, count)
             if not raw:
+                empty_response = empty_response or raw is not None
                 errors.append(f"{host}:{port} no data")
                 continue
             frame = pd.DataFrame(raw)
@@ -287,6 +338,7 @@ def _history_from_pytdx(
             frame = frame[(frame["日期_ts"] >= start_ts) & (frame["日期_ts"] <= end_ts)]
             frame = frame.drop(columns=["日期_ts"])
             if frame.empty:
+                empty_response = True
                 errors.append(f"{host}:{port} date filter empty")
                 continue
             return frame
@@ -295,6 +347,8 @@ def _history_from_pytdx(
         finally:
             with contextlib.suppress(Exception):
                 api.disconnect()
+    if empty_response:
+        raise _NoHistoryData()
     raise RuntimeError(" / ".join(errors))
 
 
@@ -315,7 +369,7 @@ def _history_from_yfinance(
         interval=interval_map.get(period, "1d"),
     )
     if frame is None or frame.empty:
-        raise RuntimeError("no data")
+        raise _NoHistoryData()
     frame = frame.reset_index()
     date_column = "Date" if "Date" in frame.columns else frame.columns[0]
     frame["日期"] = pd.to_datetime(frame[date_column]).dt.strftime("%Y-%m-%d")
@@ -344,7 +398,7 @@ def _history_from_akshare(
         adjust="qfq",
     )
     if frame is None or frame.empty:
-        raise RuntimeError("no data")
+        raise _NoHistoryData()
     columns = [c for c in ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"] if c in frame.columns]
     return frame[columns]
 

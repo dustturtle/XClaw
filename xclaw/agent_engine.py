@@ -24,6 +24,7 @@ from xclaw.llm_types import (
 )
 from xclaw.memory import FileMemory, StructuredMemory
 from xclaw.tools import ToolContext, ToolRegistry
+from xclaw.responses import DirectReply
 
 # Pattern to detect "记住..." / "remember..." quick-memory commands
 _MEMORY_PATTERN = re.compile(r"^(?:记住|remember)[：:]\s*(.+)", re.IGNORECASE | re.DOTALL)
@@ -55,6 +56,7 @@ class AgentContext:
         skip_session_persistence: bool = False,
         skip_message_persistence: bool = False,
         powercore: Any = None,
+        execution_mode: str = "analysis",
     ) -> None:
         self.chat_id = chat_id
         self.channel = channel
@@ -68,6 +70,7 @@ class AgentContext:
         self.skip_session_persistence = skip_session_persistence
         self.skip_message_persistence = skip_message_persistence
         self.powercore = powercore
+        self.execution_mode = execution_mode
 
 
 def _build_system_prompt(
@@ -86,6 +89,10 @@ def _build_system_prompt(
         "回答请使用中文，保持简洁专业。不提供投资建议，仅提供数据分析辅助。",
         (
             "## 工具使用规则\n"
+            "- 先识别交付目标：分析用户给定材料不等于全面搜集实时行情。优先评审材料的假设、逻辑与缺失条件。\n"
+            "- 仅当外部事实会影响结论、或用户要求核验时再查询；将材料内推论与外部核验明确区分。\n"
+            "- 批量提出互不依赖的只读查询；已有工具证据可复用，不为凑齐数据重复查询。\n"
+            "- 无结果不是事实不存在；相同信息缺口在有限查询后仍不可得时，应标明缺失，不反复扩张搜索。\n"
             "- 单只股票/指数/国内商品期货的行情查询：优先调用 stock_quote。\n"
             "- 单只股票/指数/国内商品期货的历史K线：优先调用 stock_history。\n"
             "- 单只股票/指数/国内商品期货的技术指标：优先调用 stock_indicators。\n"
@@ -261,7 +268,7 @@ async def agent_loop(
         if not ctx.skip_message_persistence:
             await ctx.db.save_message(ctx.chat_id, "user", user_message)
             await ctx.db.save_message(ctx.chat_id, "assistant", reply)
-        return reply
+        return DirectReply(reply)
 
     if ctx.powercore is not None:
         return await ctx.powercore.run(ctx, user_message, max_iterations=max_iterations)

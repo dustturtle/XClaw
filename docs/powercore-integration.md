@@ -57,7 +57,7 @@ MCP catalog 的 Authorization 使用 `env:XCLAW_POWERCORE_MCP_AUTHORIZATION`，�
 - 文件读写限定在服务端绑定的当前会话目录，拒绝跨目录、绝对路径越界和符号链接逃逸。
 - 前台会话持久化到 PowerCore Session；子 Agent 和定时任务使用独立 Run/Session，但仍绑定原用户。定时任务不会消费前台的 `input_required`。
 - `/reset` 取消未结束的前台 Run 并清除会话关联，不删除自选股、持仓或长期记忆。切换 backend 不自动迁移旧 Agent Loop 历史。
-- 空正文不是成功。默认最多一次仅正文补答，禁止修复轮执行工具；重复空正文进入失败终态。错误提示不会伪装成成功工具结果。
+- 空正文和已知输出截断都不是成功。默认共用最多一次仅正文补答，禁止修复轮执行工具；截断时重新生成精简完整正文，重复空白/截断进入失败终态。错误提示不会伪装成成功工具结果。
 - 工具错误仍保留失败标记，诊断正文作为不可信工具数据交还模型；不隐藏可纠正的参数错误，也不允许错误正文提升权限。
 - `max_tool_iterations` 和子 Agent 的 `max_iterations` 映射到 PowerCore `max_turns`，由 Harness 强制执行。子任务上限为 5；补答也消耗预算。
 
@@ -71,12 +71,20 @@ MCP catalog 的 Authorization 使用 `env:XCLAW_POWERCORE_MCP_AUTHORIZATION`，�
 第二个命令会消耗真实模型调用，查询真实行情，并在独立验收会话中创建记忆、自选股、模拟持仓、
 一次性任务和日报。它等待任务实际执行，读回 SQLite 与 PowerCore 公共事件，将结果写入数据目录
 `powercore/acceptance-*.json`；不只是健康检查或成功启动，也不会要求用户手工用 curl 验证。
+验收还读取受保护的 `/admin/runs/{run_id}/audit`，核对续问数值是否来自上一轮工具且没有重复查询；
+运行者须具备审计权限。工具原始结果不会因此进入普通聊天进度或公共 Session transcript。
 
-契约为 Service API `1` 与 MCP `2026-07-28`，要求包含 `max_turns` 和非空终态语义的本次 PowerCore
+契约为 Service API `1` 与 MCP `2026-07-28`，要求包含 `max_turns`、`wall_time_ms` 生效预算回读和非空终态语义的本次 PowerCore
 实现。Server/Worker 必须来自同一版本且 catalog 一致。详细镜像发布规则在独立 PowerCore 的
 `docs/contracts/distribution-v1.md`，本机二进制验收不代表已发布镜像验收。
+长任务预算使用内部 PostgreSQL schema 2（公共 API 仍是 1）。升级前备份数据库并停止旧
+Server/Worker，再同步升级两者；不能让 schema 1 的旧 Worker 与新服务混跑。
 
-当前聊天页面和原 `/api/chat/stream` 保留“终答完成后分块输出”的行为，并非模型实时 Token 流。
+聊天页面通过 `/api/chat/progress` 观察真实执行阶段、耗时、预算和终态，并支持指定 Run 的取消与刷新后恢复观察。
+成功的本地操作（例如无附件的 `/reset`）在 `/api/chat` 响应中返回 `delivery: "direct"`，
+明确表示该操作直接完成、没有创建模型 Run。页面显示确认后重新读取会话状态；普通模型回复
+不带此标记，仍必须核对真实 Run 终态，不能凭回复文字或没有 Run 就判定成功。
+原 `/api/chat/stream` 仍保留“终答完成后分块输出”的行为；执行进度不等于模型实时 Token 流。
 真实外部 IM 渠道、生产鉴权和镜像内运行需要各自独立验收，不能用本机 Web 验收替代。
 
 本轮实测结果、Run 标识和已知限制见 [实施与验证报告](powercore-integration-report.md)。
@@ -93,3 +101,49 @@ PowerCore 后端的聊天页可以选择并预览 PNG/JPEG/WebP，最多 4 张�
 可在真实验收命令增加 `--expected-model <模型 ID> --multimodal --numeric-transcription`，检查
 实际 Run 模型、随机图像事实、图片续问及行情数值与原始工具输出的一致性。
 新模型结果见 [GLM-5.3-Flash 验收报告](glm53flash-acceptance-report.md)。
+
+## 长任务预算与观察
+
+页面可以选择普通模式（默认 180 秒）和分析模式（默认 600 秒，初始选中）。API 请求可携带
+`execution_mode: standard | analysis`；省略时使用分析模式。不按文本长度或股票代码猜测任务类型。
+`powercore_standard_timeout`、`powercore_run_timeout` 为两种模式的整轮预算；`powercore_model_timeout`
+独立控制本地 PowerCore 的模型单次请求上限，默认 600 秒，仍会被整轮预算和收尾边界提前约束。
+原 `timeout` 保留给 XClaw native/工具内部模型调用与旧客户端配置，不再隐式成为长任务的 240 秒重试边界。
+本机启动器在 PowerCore `[server]` 中设置 `run_default_wall_time_ms`、
+`run_max_wall_time_ms` 和 `run_finalization_reserve_ms`，不会改写带 Key 的本机 YAML。
+收尾默认预留 120 秒；它是整轮预算的一部分，不会在硬截止后额外增加时间。该分配来自真实长文
+验收中首轮 240 秒重试与 45 秒收尾不足的证据，不依赖某个模型名称做代码分支。
+
+独立服务可收紧请求预算，XClaw 必须使用 accepted 响应中的 `wall_time_ms`，不能假设请求值已生效。
+旧服务不返回预算时会明确提示升级并请求取消，不会静默退回 180 秒。观察等待使用生效预算加传输余量；
+观察超时/断线不等于执行失败，不会自动重新提交用户请求。预算、恢复计数和最终完成判定仍由 PowerCore 管理。
+
+`GET /api/chat/progress?chat_id=...&include_history=true` 返回当前前台 Run 的安全投影，历史默认不返回；
+旧终态没有记录耗时时会省略 `elapsed_seconds`，页面显示“耗时未记录”，不把任务年龄当成执行耗时。
+`POST /api/chat/cancel` 使用 `{chat_id, run_id}`，只能取消该会话当前绑定的 Run，服务端确认之前显示取消中。
+两者沿用聊天鉴权和用户命名空间。刷新页面重新观察同一 Run；浏览器断线不取消执行。单 XClaw 进程重启后，
+可根据 SQLite 绑定继续读取 PowerCore 事件，而不是新建 Run。终答使用执行事件键去重；子任务和后台任务不会
+覆盖前台会话关联。多副本入口协调仍不在本地部署契约内。
+
+PowerCore 的私有模型历史保留已配对的历史工具调用/结果，续问可以读取未出现在上一轮终答里的数据，
+但公共 Session transcript 仍只返回用户输入和最终答复。历史证据不会计入新 Run 的成功收据。
+保留上限为 32 轮、256 条消息；工具证据使用独立 256 KiB 预算，对话/图片另有 32 MiB 预算，
+模型实际上下文仍受 ContextEngine 限制。超限会标记省略，不伪造数据。已 checkpoint 的旧 Run
+保持原快照，不会被本次升级暗中回填或将旧失败改成成功。
+
+行情工具的 `independent` 默认为 false，经过审查的独立只读查询才导出 true。历史数据层使用有界同参合并、
+短 TTL 缓存和失败源退避，短暂忙碌的数据源在查询预算内等待，不立即被视为故障；第三方同步 SDK 超时后仍保留
+实际线程名额，最多每源一个线程，不能通过重复超时无限积累线程。卡死 SDK 无法强制中断，但不会阻塞进程退出。
+工具输出携带来源、获取时间与数据截至日期；缓存不是实时行情保证。搜索返回网页摘要与链接，不将摘要伪装成已核验正文。
+
+长文验收不缩短原始输入，在新会话执行，不覆盖用户历史：
+
+```sh
+.venv/bin/python scripts/verify_long_tasks.py \
+  --source-db xclaw.data/powercore-glm53flash/xclaw.db --message-id 35 \
+  --data-dir xclaw.data/powercore-long-tasks --case all --cancel
+```
+
+源消息 ID 属于本机已复现的长文，其他环境应指定自己的真实用例。运行会消耗模型和数据服务调用；
+输出在忽略的数据目录 `powercore/long-task-acceptance-*.json`。实施计划见 [长任务优化方案](long-task-optimization-plan.md)。
+分轮验收证据与未完成项见 [长任务验收报告](long-task-optimization-report.md)。

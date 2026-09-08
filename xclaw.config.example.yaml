@@ -21,6 +21,10 @@ powercore_tenant_id: "tenant_xclaw"
 powercore_user_id: "user_xclaw"
 powercore_mcp_token: ""            # 必填的工具回调凭证，不能与用户 Web Token 混用
 powercore_profile: "mcp-controlled" # mcp-readonly 仅查询；mcp-controlled 支持用户自己的状态操作
+powercore_run_timeout: 600.0       # 分析模式整轮预算（秒），服务端可收紧
+powercore_standard_timeout: 180.0  # 普通模式整轮预算；不影响单次模型 timeout
+powercore_model_timeout: 600.0     # 本地 PowerCore 模型单次上限，仍受整轮/收尾预算限制
+powercore_finalization_reserve: 120.0 # 本地启动器为服务端配置的收尾预留（秒）
 
 # ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
 # Web 界面（默认启用，绑定本地，不暴露公网）

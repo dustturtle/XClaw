@@ -17,6 +17,8 @@ class StockQuoteTool(Tool):
     """Fetch current stock quote (price, change, volume)."""
 
     read_only = True
+    # Per-call HTTP clients/Tickers and local results; no context or file writes.
+    independent = True
 
     _CN_HTTP_TIMEOUT_SECONDS = 3.0
     _BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0"}

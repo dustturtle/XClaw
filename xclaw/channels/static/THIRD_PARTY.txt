@@ -1,0 +1,11 @@
+markdown-it 15.0.1 (MIT)
+Source: https://www.npmjs.com/package/markdown-it/v/15.0.1
+Upstream: https://github.com/markdown-it/markdown-it
+Vendored file: package/dist/browser/markdown-it.umd.min.js -> markdown-it.min.js
+License: markdown-it.LICENSE.txt
+Tarball integrity (npm sha512):
+9/7gE95FNPkfUWrjJIoHZza2iLmuJlPD0UNMxPi7bxUrbCR525YZY0r+zyfes0dZI5ZZ/uNIXUJca0pJvtw41g==
+
+The browser uses the local bundle only, with raw HTML and Markdown images disabled.
+No plugins or custom syntax inject untrusted HTML. Keep tests/test_chat_ui.py
+passing when updating this dependency.

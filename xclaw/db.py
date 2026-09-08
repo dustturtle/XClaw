@@ -14,6 +14,21 @@ import aiosqlite
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS web_receipts (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    boot_id TEXT NOT NULL,
+    submission_id TEXT,
+    run_id TEXT,
+    baseline_cursor INTEGER NOT NULL DEFAULT 0,
+    result_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(scope,request_id)
+);
+
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel TEXT NOT NULL,
@@ -55,6 +70,19 @@ CREATE TABLE IF NOT EXISTS powercore_runs (
     input_request_json TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS powercore_submissions (
+    submission_id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id),
+    path TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    allowed_tools_json TEXT NOT NULL,
+    conversational INTEGER NOT NULL,
+    persist_message INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS powercore_pending_chat
+ON powercore_submissions(chat_id) WHERE conversational=1;
 
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +266,58 @@ class Database:
         self._conn = await aiosqlite.connect(str(self._path))
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        for table, additions in {
+            "powercore_runs": {
+                "wall_time_ms": "INTEGER NOT NULL DEFAULT 180000",
+                "progress_json": "TEXT NOT NULL DEFAULT '{}'",
+                "reply": "TEXT",
+                "reply_cursor": "INTEGER",
+                "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
+                "persist_message": "INTEGER NOT NULL DEFAULT 1",
+                "conversational": "INTEGER NOT NULL DEFAULT 1",
+                "submission_id": "TEXT",
+                "observe_retry_at": "REAL",
+                "observe_attempts": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "powercore_submissions": {
+                "receipt_id": "TEXT",
+                "kind": "TEXT NOT NULL DEFAULT 'run'",
+                "run_id": "TEXT",
+                "cursor": "INTEGER NOT NULL DEFAULT 0",
+                "observe_retry_at": "REAL",
+                "observe_attempts": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "messages": {"execution_key": "TEXT"},
+        }.items():
+            async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
+                columns = {row["name"] for row in await cur.fetchall()}
+            for name, definition in additions.items():
+                if name not in columns:
+                    await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                    if table == "powercore_runs" and name == "reply_cursor":
+                        # Legacy replies are already in messages without execution keys.
+                        # Do not replay all old completed chats during the first upgrade.
+                        await self._conn.execute(
+                            "UPDATE powercore_runs SET reply_cursor=cursor "
+                            "WHERE status IN ('completed','failed','cancelled','waiting_input')"
+                        )
+                    if table == "powercore_runs" and name == "conversational":
+                        await self._conn.execute(
+                            "UPDATE powercore_runs SET conversational=0 WHERE NOT EXISTS "
+                            "(SELECT 1 FROM powercore_sessions s WHERE s.run_id=powercore_runs.run_id)"
+                        )
+        await self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS messages_execution_key ON messages(execution_key)"
+        )
+        await self._conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS web_receipt_submission_link
+            AFTER INSERT ON powercore_submissions WHEN NEW.receipt_id IS NOT NULL
+            BEGIN
+                UPDATE web_receipts SET submission_id=NEW.submission_id,run_id=NEW.run_id,
+                    baseline_cursor=NEW.cursor,updated_at=datetime('now')
+                WHERE id=NEW.receipt_id AND submission_id IS NULL;
+            END;
+        """)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -269,12 +349,16 @@ class Database:
             if row:
                 return row["id"]
 
-        async with self.conn.execute(
-            "INSERT INTO chats (channel, external_chat_id, chat_type, title) VALUES (?,?,?,?)",
+        await self.conn.execute(
+            "INSERT INTO chats (channel, external_chat_id, chat_type, title) VALUES (?,?,?,?) "
+            "ON CONFLICT(channel,external_chat_id) DO NOTHING",
             (channel, external_chat_id, chat_type, title),
+        )
+        await self.conn.commit()
+        async with self.conn.execute(
+            "SELECT id FROM chats WHERE channel=? AND external_chat_id=?", (channel, external_chat_id),
         ) as cur:
-            await self.conn.commit()
-            return cur.lastrowid  # type: ignore[return-value]
+            return (await cur.fetchone())["id"]
 
     async def get_chat(self, chat_id: int) -> dict[str, Any] | None:
         async with self.conn.execute(
@@ -338,18 +422,25 @@ class Database:
 
     async def bind_powercore_run(
         self, chat_id: int, run_id: str, session_id: str, allowed_tools: list[str],
-        *, conversational: bool = True,
+        *, conversational: bool = True, wall_time_ms: int = 180000, persist_message: bool = True,
+        submission_id: str | None = None,
     ) -> None:
         await self.conn.execute(
-            "INSERT INTO powercore_runs(run_id,chat_id,session_id,allowed_tools_json) "
-            "VALUES(?,?,?,?) ON CONFLICT(run_id) DO NOTHING",
-            (run_id, chat_id, session_id, json.dumps(allowed_tools)),
+            "INSERT INTO powercore_runs(run_id,chat_id,session_id,allowed_tools_json,wall_time_ms,persist_message,conversational,submission_id) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO NOTHING",
+            (run_id, chat_id, session_id, json.dumps(allowed_tools), wall_time_ms,
+             int(persist_message), int(conversational), submission_id),
         )
         if conversational:
             await self.conn.execute(
                 "INSERT INTO powercore_sessions(chat_id,session_id,run_id) VALUES(?,?,?) "
                 "ON CONFLICT(chat_id) DO UPDATE SET session_id=excluded.session_id,run_id=excluded.run_id",
                 (chat_id, session_id, run_id),
+            )
+        if submission_id:
+            await self.conn.execute(
+                "UPDATE web_receipts SET run_id=?,updated_at=datetime('now') WHERE submission_id=?",
+                (run_id, submission_id),
             )
         await self.conn.commit()
 
@@ -359,6 +450,72 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def save_powercore_submission(self, chat_id: int, path: str, request: dict,
+                                       allowed_tools: list[str], *, conversational: bool, persist_message: bool,
+                                       kind: str = "run", run_id: str | None = None, cursor: int = 0,
+                                       submission_id: str | None = None) -> dict:
+        submission_id = submission_id or request["idempotency_key"]
+        from xclaw.receipts import current_receipt
+
+        await self.conn.execute(
+            "INSERT INTO powercore_submissions(submission_id,chat_id,path,request_json,allowed_tools_json,conversational,persist_message,kind,run_id,cursor,receipt_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (submission_id, chat_id, path, json.dumps(request, ensure_ascii=False),
+             json.dumps(allowed_tools), int(conversational), int(persist_message), kind, run_id, cursor,
+             current_receipt.get() if conversational else None),
+        )
+        await self.conn.commit()
+        async with self.conn.execute("SELECT * FROM powercore_submissions WHERE submission_id=?", (submission_id,)) as cur:
+            return dict(await cur.fetchone())
+
+    async def get_pending_powercore_submission(self, chat_id: int) -> dict | None:
+        async with self.conn.execute(
+            "SELECT * FROM powercore_submissions WHERE chat_id=? AND conversational=1", (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def clear_powercore_submission(self, submission_id: str) -> None:
+        await self.conn.execute("DELETE FROM powercore_submissions WHERE submission_id=?", (submission_id,))
+        await self.conn.commit()
+
+    async def pending_powercore_background(
+        self, *, due_before: float | None = None, limit: int = 1000,
+    ) -> tuple[list[dict], list[dict]]:
+        due = "" if due_before is None else " AND observe_retry_at <= ?"
+        params = (limit,) if due_before is None else (due_before, limit)
+        async with self.conn.execute(
+            "SELECT * FROM powercore_submissions WHERE conversational=0" + due +
+            " ORDER BY COALESCE(observe_retry_at,0),created_at LIMIT ?", params,
+        ) as cur:
+            submissions = [dict(row) for row in await cur.fetchall()]
+        async with self.conn.execute(
+            "SELECT r.* FROM powercore_runs r WHERE r.conversational=0 AND NOT EXISTS "
+            "(SELECT 1 FROM powercore_submissions s WHERE s.submission_id=r.submission_id) "
+            "AND (r.status IN ('queued','running','waiting_input') OR "
+            "(r.status IN ('completed','failed','cancelled') AND (r.reply_cursor IS NULL OR r.reply_cursor != r.cursor)))" +
+            due + " ORDER BY COALESCE(observe_retry_at,0),created_at LIMIT ?", params,
+        ) as cur:
+            runs = [dict(row) for row in await cur.fetchall()]
+        return submissions, runs
+
+    async def arm_powercore_background(self) -> None:
+        for table in ("powercore_runs", "powercore_submissions"):
+            await self.conn.execute(
+                f"UPDATE {table} SET observe_retry_at=0 WHERE conversational=0 AND observe_retry_at IS NULL"
+            )
+        await self.conn.commit()
+
+    async def defer_powercore_observation(
+        self, identity: str, retry_at: float, *, submission: bool = False,
+    ) -> None:
+        table, column = ("powercore_submissions", "submission_id") if submission else ("powercore_runs", "run_id")
+        await self.conn.execute(
+            f"UPDATE {table} SET observe_retry_at=?,observe_attempts=observe_attempts+1 WHERE {column}=?",
+            (retry_at, identity),
+        )
+        await self.conn.commit()
 
     async def get_powercore_session(self, chat_id: int) -> dict[str, Any] | None:
         async with self.conn.execute(
@@ -379,6 +536,34 @@ class Database:
 
     async def clear_powercore_session(self, chat_id: int) -> None:
         await self.conn.execute("DELETE FROM powercore_sessions WHERE chat_id=?", (chat_id,))
+        await self.conn.commit()
+
+    async def save_powercore_progress(self, run_id: str, progress: dict[str, Any]) -> None:
+        await self.conn.execute(
+            "UPDATE powercore_runs SET progress_json=? WHERE run_id=?",
+            (json.dumps(progress, ensure_ascii=False), run_id),
+        )
+        await self.conn.commit()
+
+    async def request_powercore_cancel(self, run_id: str) -> None:
+        await self.conn.execute(
+            "UPDATE powercore_runs SET cancel_requested=1,progress_json=? "
+            "WHERE run_id=? AND status NOT IN ('completed','failed','cancelled')",
+            (json.dumps({"stage": "cancelling", "message": "取消请求待确认"}), run_id),
+        )
+        await self.conn.commit()
+
+    async def save_powercore_reply(self, run_id: str, reply: str, *, persist_message: bool = True) -> None:
+        if persist_message:
+            # A resumed observer can replay the terminal event, but not its chat message.
+            await self.conn.execute(
+                "INSERT INTO messages(chat_id,role,content,execution_key) "
+                "SELECT chat_id,'assistant',?,'pc:'||run_id||':'||cursor FROM powercore_runs WHERE run_id=? "
+                "ON CONFLICT(execution_key) DO NOTHING", (reply, run_id),
+            )
+        await self.conn.execute(
+            "UPDATE powercore_runs SET reply=?,reply_cursor=cursor WHERE run_id=?", (reply, run_id),
+        )
         await self.conn.commit()
 
     # ── Memories ──────────────────────────────────────────────────────────────

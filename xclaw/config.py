@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     powercore_user_id: str = "user_xclaw"
     powercore_mcp_token: str = ""
     powercore_profile: Literal["mcp-readonly", "mcp-controlled"] = "mcp-controlled"
+    powercore_run_timeout: float = Field(default=600.0, ge=1, le=3600)
+    powercore_standard_timeout: float = Field(default=180.0, ge=1, le=3600)
+    powercore_model_timeout: float = Field(default=600.0, ge=1, le=3600)
+    powercore_finalization_reserve: float = Field(default=120.0, ge=0.001, le=300)
 
     # ── Web channel ──────────────────────────────────────────────────────────
     web_enabled: bool = True

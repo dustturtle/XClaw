@@ -24,6 +24,41 @@ def json_reply(text):
     return json.loads(text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip())
 
 
+def tool_texts_from_checkpoint(checkpoint):
+    messages = checkpoint["history"]
+    names = {block["id"]: block["name"] for message in messages for block in message["content"] if block["type"] == "tool_use"}
+    sources = {}
+    for message in messages:
+        for block in message["content"]:
+            if block["type"] != "tool_result" or block.get("is_error"):
+                continue
+            name = names.get(block["tool_use_id"])
+            if name is None:
+                continue
+            result = json.loads(block["content"][0]["text"])["result"]["result"]
+            sources[name] = "\n".join(item["text"] for item in result["content"] if item["type"] == "text")
+    return sources
+
+
+def verify_quote_continuation(source, reply, run_events):
+    assert not any(event["type"] == "tool.started" for event in run_events), "continuation must reuse evidence without new tools"
+    expected = {}
+    for field in ("昨收", "涨跌幅"):
+        match = re.search(rf"^{field}:\s*([+-]?\d+(?:\.\d+)?%?)\s*$", source, re.MULTILINE)
+        assert match, f"quote source lacks a numeric {field}"
+        expected[field] = match[1]
+        assert match[1] in reply, f"continuation {field} differs from the original tool evidence"
+    assert "600519" in reply and "贵州茅台" in reply
+    return expected
+
+
+def verify_memory_reference(marker, source, reply):
+    assert marker in source, "persisted memory must be present in the actual read-tool result"
+    label, separator, identifier = marker.rpartition("-")
+    assert separator and label and identifier, "acceptance marker must contain a unique identifier"
+    assert label in reply and identifier in reply, "display must preserve memory content and identity"
+
+
 def visual_fixture(path):
     from PIL import Image, ImageDraw, ImageFont
 
@@ -54,6 +89,7 @@ def main() -> None:
     parser.add_argument("--expected-model", help="Require the UI configuration and every Run to use this model")
     parser.add_argument("--multimodal", action="store_true", help="Verify actual image input and follow-up through XClaw")
     parser.add_argument("--numeric-transcription", action="store_true", help="Compare the final numeric table with actual tool results")
+    parser.add_argument("--timeout", type=float, default=750, help="Observation timeout; must outlast the admitted run budget")
     args = parser.parse_args()
     database = args.data_dir.resolve() / "xclaw.db"
     db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
@@ -71,7 +107,7 @@ def main() -> None:
     }
     if token := os.environ.get("XCLAW_POWERCORE_API_TOKEN"):
         pc_headers = {"Authorization": f"Bearer {token}"}
-    client = httpx.Client(base_url=args.url, headers=headers, timeout=300, trust_env=False)
+    client = httpx.Client(base_url=args.url, headers=headers, timeout=args.timeout, trust_env=False)
     core = httpx.Client(base_url=args.powercore_url, headers=pc_headers, timeout=30, trust_env=False)
 
     def rows(sql, *params):
@@ -111,12 +147,15 @@ def main() -> None:
         evidence["cases"].append(record)
         assert reply.strip(), f"{name}: empty response"
         assert run["status"] == status, f"{name}: unexpected status {run['status']}"
+        if status == "completed":
+            assert run_events[-1]["type"] == "run.completed" and run_events[-1].get("response") == reply
+            assert run_events[-1].get("finish_reason") not in {"length", "max_tokens", "max_output_tokens"}, f"{name}: truncated final answer"
         if args.expected_model:
             assert any(event.get("type") == "run.started" and event.get("model") == args.expected_model for event in run_events), f"{name}: wrong model"
         for tool in tools:
             assert any(event.get("type") == "tool.completed" and event.get("name", "").endswith(tool)
                        and event.get("is_error") is False for event in run_events), f"{name}: no successful {tool}"
-        print(f"PASS {name}: {run['run_id']} ({record['seconds']}s)", flush=True)
+        print(f"RUN {name}: {run['run_id']} {run['status']} ({record['seconds']}s)", flush=True)
         return record
 
     try:
@@ -144,6 +183,10 @@ def main() -> None:
         followup = chat("continuation", "刚才是哪只股票？请给出股票名称、代码、昨收和涨跌幅，不要重新查询。")
         assert "600519" in followup["reply"]
         assert followup["run"]["session_id"] == quote["run"]["session_id"]
+        quote_audit = core.get(f"/admin/runs/{quote['run']['run_id']}/audit")
+        quote_audit.raise_for_status()
+        quote_source = next(text for name, text in tool_texts_from_checkpoint(quote_audit.json()["checkpoint"]).items() if name.endswith("stock_quote"))
+        evidence["continuation_evidence"] = verify_quote_continuation(quote_source, followup["reply"], followup["events"])
         chat("stateful_tools", f"这是本地验收会话。把贵州茅台 600519 加入自选股；把“{marker}”写入结构化记忆；记录本地模拟持仓 600519，2 股，成本价1000元。不是实际交易，禁止下单。", tools=("watchlist_manage", "structured_memory_update", "portfolio_manage"))
         first_id = owner(first)
         assert rows("SELECT * FROM watchlist WHERE chat_id=? AND symbol='600519'", first_id)
@@ -188,18 +231,8 @@ def main() -> None:
         if args.numeric_transcription:
             audit_response = core.get(f"/admin/runs/{history['run']['run_id']}/audit")
             audit_response.raise_for_status()
-            messages = audit_response.json()["checkpoint"]["history"]
-            names = {block["id"]: block["name"] for message in messages for block in message["content"] if block["type"] == "tool_use"}
-            sources = {}
-            for message in messages:
-                for block in message["content"]:
-                    if block["type"] != "tool_result" or block.get("is_error"):
-                        continue
-                    name = names.get(block["tool_use_id"], "")
-                    for tool in ("stock_history", "stock_indicators"):
-                        if name.endswith(tool):
-                            result = json.loads(block["content"][0]["text"])["result"]["result"]
-                            sources[tool] = "\n".join(item["text"] for item in result["content"] if item["type"] == "text")
+            sources = {tool: text for name, text in tool_texts_from_checkpoint(audit_response.json()["checkpoint"]).items()
+                       for tool in ("stock_history", "stock_indicators") if name.endswith(tool)}
             expected_rows = []
             for line in sources["stock_history"].splitlines():
                 fields = line.split()
@@ -221,8 +254,16 @@ def main() -> None:
         assert not rows("SELECT * FROM powercore_sessions WHERE chat_id=?", first_id)
         restored = chat("reset_keeps_business_state", "请读取当前结构化记忆、自选股和持仓，只读。", tools=("structured_memory_read", "watchlist_manage", "portfolio_manage"))
         assert restored["run"]["session_id"] != old_session
-        assert marker in restored["reply"] and "600519" in restored["reply"]
+        assert rows("SELECT * FROM memories WHERE chat_id=? AND content LIKE ?", first_id, f"%{marker}%")
+        assert rows("SELECT * FROM watchlist WHERE chat_id=? AND symbol='600519'", first_id)
+        assert rows("SELECT * FROM portfolio WHERE chat_id=? AND symbol='600519' AND shares=2 AND avg_cost=1000", first_id)
+        restored_audit = core.get(f"/admin/runs/{restored['run']['run_id']}/audit")
+        restored_audit.raise_for_status()
+        memory_source = next(text for name, text in tool_texts_from_checkpoint(restored_audit.json()["checkpoint"]).items() if name.endswith("structured_memory_read"))
+        verify_memory_reference(marker, memory_source, restored["reply"])
+        assert "600519" in restored["reply"]
         evidence["status"] = "passed"
+        print("PASS complete business acceptance, including audited continuation and reset persistence", flush=True)
     except Exception as exc:
         evidence["status"] = "failed"
         evidence["error"] = f"{type(exc).__name__}: {exc}"

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import html
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Coroutine
+from typing import Any, AsyncIterator, Callable, Coroutine, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +36,8 @@ from xclaw.investment.report_service import InvestmentReportService
 from xclaw.investment.report_export_service import ReportExportService
 from xclaw.oauth import OAuthLoginNotFoundError
 from xclaw.attachments import ChatBodyLimitMiddleware, ImageAttachment, MAX_IMAGES
+from xclaw.responses import DirectReply
+from xclaw.receipts import ReceiptStore, ReceiptConflict, REQUEST_ID_PATTERN
 
 # Rate limiting (slowapi)
 try:
@@ -49,9 +53,11 @@ except ImportError:
 # ── Request / Response models (module-level for annotation resolution) ────────
 
 class ChatRequest(BaseModel):
+    request_id: str | None = Field(default=None, pattern=REQUEST_ID_PATTERN)
     chat_id: str = "web_default"
     message: str = ""
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_IMAGES)
+    execution_mode: Literal["standard", "analysis"] | None = None
 
     @model_validator(mode="after")
     def require_content(self):
@@ -63,6 +69,46 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     chat_id: str
     reply: str
+    delivery: Literal["direct"] | None = None
+
+
+_RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+
+
+class ChatCancelRequest(BaseModel):
+    chat_id: str = "web_default"
+    run_id: str = Field(min_length=1, max_length=128, pattern=_RUN_ID_PATTERN)
+
+
+class ChatProgressMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    run_id: str | None = Field(default=None, pattern=_RUN_ID_PATTERN)
+
+
+class ChatProgressSnapshot(BaseModel):
+    run_id: str | None = Field(default=None, pattern=_RUN_ID_PATTERN)
+    status: Literal["idle", "queued", "running", "waiting_input", "completed", "failed", "cancelled"]
+    stage: str
+    message: str
+    elapsed_seconds: float | None = Field(ge=0, allow_inf_nan=False)
+    wall_time_ms: int = Field(ge=0)
+    sequence: int = Field(ge=0)
+    reply: str | None = None
+    error_code: str | None = None
+    messages: list[ChatProgressMessage] | None = None
+
+
+def _public_chat_progress(snapshot: dict, *, include_history: bool = False) -> dict:
+    """Only expose the runtime's public projection, never event/trace metadata."""
+    payload = {key: value for key, value in snapshot.items() if key != "messages"}
+    if include_history and "messages" in snapshot:
+        payload["messages"] = [
+            item for item in snapshot["messages"] or []
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+            and isinstance(item.get("content"), str)
+        ]
+    return ChatProgressSnapshot.model_validate(payload).model_dump(exclude_none=True)
 
 
 class WxMpLoginRequest(BaseModel):
@@ -110,6 +156,8 @@ def _build_chat_page_html(
     model_name: str,
     provider_name: str,
     supports_images: bool = False,
+    supports_progress: bool = False,
+    supports_receipts: bool = False,
 ) -> str:
     """Return a lightweight browser chat UI for local validation."""
     auth_flag = json.dumps(auth_enabled)
@@ -121,397 +169,140 @@ def _build_chat_page_html(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>XClaw Chat</title>
-  <style>
-    :root {{
-      --bg: #f6efe4;
-      --panel: rgba(255, 252, 247, 0.88);
-      --panel-strong: #fffaf2;
-      --line: rgba(76, 53, 29, 0.12);
-      --text: #2e2418;
-      --muted: #7a6853;
-      --brand: #bf5a36;
-      --brand-deep: #7b2f16;
-      --user: #2f5f4f;
-      --user-soft: #d8ece2;
-      --bot-soft: #f7e3ce;
-      --shadow: 0 20px 50px rgba(85, 56, 22, 0.12);
-      --radius: 22px;
-    }}
-    * {{
-      box-sizing: border-box;
-    }}
-    .attachment-preview {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }}
-    .attachment-preview img {{ width: 96px; height: 72px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; }}
-    .message img {{ display: block; max-width: 100%; max-height: 320px; margin-top: 12px; border-radius: 10px; object-fit: contain; }}
-    html, body {{
-      margin: 0;
-      min-height: 100%;
-      font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(255, 209, 158, 0.65), transparent 28%),
-        radial-gradient(circle at top right, rgba(190, 225, 204, 0.7), transparent 30%),
-        linear-gradient(180deg, #f8f2e9 0%, #f4eadb 100%);
-    }}
-    body {{
-      display: grid;
-      place-items: center;
-      padding: 24px;
-    }}
-    .shell {{
-      width: min(1120px, 100%);
-      min-height: min(860px, calc(100vh - 48px));
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      border: 1px solid rgba(95, 65, 33, 0.08);
-      border-radius: 30px;
-      overflow: hidden;
-      box-shadow: var(--shadow);
-      background: rgba(255, 250, 243, 0.76);
-      backdrop-filter: blur(20px);
-    }}
-    .sidebar {{
-      padding: 28px 24px;
-      background:
-        linear-gradient(180deg, rgba(92, 45, 26, 0.96), rgba(59, 29, 17, 0.96)),
-        linear-gradient(180deg, transparent, transparent);
-      color: #fff8ef;
-      display: flex;
-      flex-direction: column;
-      gap: 18px;
-    }}
-    .brand {{
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }}
-    .badge {{
-      width: fit-content;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.12);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }}
-    h1 {{
-      margin: 0;
-      font-size: 34px;
-      line-height: 1;
-      font-weight: 700;
-    }}
-    .subtitle {{
-      margin: 0;
-      color: rgba(255, 248, 239, 0.78);
-      line-height: 1.6;
-      font-size: 15px;
-    }}
-    .meta, .tips {{
-      padding: 16px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-    }}
-    .meta strong, .tips strong {{
-      display: block;
-      margin-bottom: 8px;
-      font-size: 13px;
-      color: rgba(255, 248, 239, 0.88);
-    }}
-    .meta div, .tips div {{
-      color: rgba(255, 248, 239, 0.74);
-      font-size: 14px;
-      line-height: 1.6;
-    }}
-    .sidebar a {{
-      color: #ffd8b6;
-    }}
-    .main {{
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      min-height: 0;
-      background:
-        linear-gradient(180deg, rgba(255, 252, 247, 0.9), rgba(255, 249, 241, 0.96));
-    }}
-    .toolbar {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 20px 24px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 250, 244, 0.74);
-      backdrop-filter: blur(18px);
-    }}
-    .toolbar-title {{
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }}
-    .toolbar-title strong {{
-      font-size: 18px;
-    }}
-    .toolbar-title span {{
-      color: var(--muted);
-      font-size: 13px;
-    }}
-    .toolbar-actions {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }}
-    .status {{
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: #f0e6d8;
-      color: var(--brand-deep);
-      font-size: 12px;
-      border: 1px solid rgba(123, 47, 22, 0.1);
-    }}
-    button, input, textarea {{
-      font: inherit;
-    }}
-    .ghost, .primary {{
-      appearance: none;
-      border: none;
-      border-radius: 14px;
-      padding: 11px 15px;
-      cursor: pointer;
-      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
-    }}
-    .ghost {{
-      background: #efe2d1;
-      color: var(--brand-deep);
-    }}
-    .primary {{
-      background: linear-gradient(135deg, var(--brand), #d07a49);
-      color: white;
-      font-weight: 600;
-      min-width: 112px;
-    }}
-    button:hover {{
-      transform: translateY(-1px);
-    }}
-    button:disabled {{
-      opacity: 0.55;
-      cursor: wait;
-      transform: none;
-    }}
-    .messages {{
-      padding: 24px;
-      overflow: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }}
-    .message {{
-      max-width: min(760px, 88%);
-      border-radius: 22px;
-      padding: 16px 18px;
-      line-height: 1.65;
-      white-space: pre-wrap;
-      word-break: break-word;
-      box-shadow: 0 8px 22px rgba(92, 62, 23, 0.07);
-      animation: rise 160ms ease-out;
-    }}
-    .message.system {{
-      max-width: 100%;
-      background: rgba(247, 232, 214, 0.9);
-      color: #73553b;
-      border: 1px solid rgba(126, 90, 52, 0.12);
-    }}
-    .message.assistant {{
-      align-self: flex-start;
-      background: var(--bot-soft);
-      border-top-left-radius: 8px;
-    }}
-    .message.user {{
-      align-self: flex-end;
-      background: var(--user-soft);
-      color: #18392d;
-      border-top-right-radius: 8px;
-    }}
-    .composer {{
-      border-top: 1px solid var(--line);
-      padding: 18px 20px 20px;
-      background: rgba(255, 250, 244, 0.9);
-    }}
-    .advanced {{
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      margin-bottom: 12px;
-    }}
-    .field {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }}
-    .field label {{
-      font-size: 12px;
-      color: var(--muted);
-    }}
-    .field input, textarea {{
-      width: 100%;
-      border-radius: 16px;
-      border: 1px solid rgba(107, 79, 47, 0.14);
-      background: rgba(255, 255, 255, 0.92);
-      color: var(--text);
-      padding: 14px 16px;
-      outline: none;
-      transition: border-color 120ms ease, box-shadow 120ms ease;
-    }}
-    .field input:focus, textarea:focus {{
-      border-color: rgba(191, 90, 54, 0.42);
-      box-shadow: 0 0 0 4px rgba(191, 90, 54, 0.12);
-    }}
-    textarea {{
-      min-height: 108px;
-      resize: vertical;
-    }}
-    .composer-row {{
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 12px;
-      align-items: end;
-    }}
-    .composer-note {{
-      margin-top: 10px;
-      font-size: 12px;
-      color: var(--muted);
-    }}
-    @keyframes rise {{
-      from {{
-        transform: translateY(8px);
-        opacity: 0;
-      }}
-      to {{
-        transform: translateY(0);
-        opacity: 1;
-      }}
-    }}
-    @media (max-width: 920px) {{
-      body {{
-        padding: 12px;
-      }}
-      .shell {{
-        grid-template-columns: 1fr;
-        min-height: calc(100vh - 24px);
-      }}
-      .sidebar {{
-        padding: 20px;
-      }}
-      .advanced, .composer-row {{
-        grid-template-columns: 1fr;
-      }}
-      .message {{
-        max-width: 100%;
-      }}
-    }}
-  </style>
+  <link rel="stylesheet" href="/chat-assets/chat.css?v=2" />
+  <script src="/chat-assets/markdown-it.min.js"></script>
+  <script src="/chat-assets/markdown.js?v=2"></script>
 </head>
 <body>
   <div class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="badge">Local Chat</div>
-        <h1>XClaw</h1>
-        <p class="subtitle">不用 Swagger，不用命令行。直接在浏览器里验证你这台机器上的 Agent 是否真的能对话。</p>
-      </div>
-      <div class="meta">
-        <strong>当前模型</strong>
-        <div>{safe_provider} / {safe_model}</div>
-      </div>
-      <div class="tips">
-        <strong>怎么用</strong>
-        <div>左下角输入消息直接发送。会话 ID 会自动记住，刷新页面也能继续同一个对话。</div>
-      </div>
-      <div class="tips">
-        <strong>附加入口</strong>
-        <div><a href="/docs" target="_blank" rel="noreferrer">Swagger 文档</a> 仍然保留，适合调接口时对照看。</div>
-      </div>
-    </aside>
     <main class="main">
       <header class="toolbar">
         <div class="toolbar-title">
-          <strong>浏览器聊天页</strong>
-          <span>最小可用界面，默认调用 <code>/api/chat</code></span>
+          <strong>XClaw <span class="brand-caption">对话</span></strong>
+          <span class="model-name">{safe_model}</span>
         </div>
         <div class="toolbar-actions">
           <div class="status" id="status-pill">准备就绪</div>
-          <button class="ghost" id="clear-btn" type="button">清空消息</button>
+          <details class="settings" id="chat-settings">
+            <summary>设置</summary>
+            <div class="settings-panel">
+              <div class="settings-heading">会话设置</div>
+              <div class="field">
+                <label for="chat-id">会话 ID</label>
+                <input id="chat-id" placeholder="比如 demo 或 my-session" />
+              </div>
+              <div class="field">
+                <label for="auth-token">Bearer Token（可选）</label>
+                <input id="auth-token" type="password" autocomplete="off" placeholder="服务启用鉴权时在这里填" />
+              </div>
+              <div class="field" {('' if supports_progress else 'hidden')}>
+                <label for="execution-mode">执行模式</label>
+                <select id="execution-mode">
+                  <option value="standard">普通 · 3 分钟</option>
+                  <option value="analysis" selected>分析 · 10 分钟</option>
+                </select>
+              </div>
+              <p class="settings-note" id="composer-note">{("当前服务启用了鉴权，请先填写 Token。" if auth_enabled else "当前服务未启用鉴权，可以直接开始聊天。")}</p>
+              <div class="settings-meta">{safe_provider} / {safe_model}</div>
+              <button class="ghost" id="clear-btn" type="button">清空显示</button>
+              <button class="ghost" id="release-receipt-btn" type="button" hidden>结束本次提交核对</button>
+              <p class="settings-note">只清空页面，不会取消任务或重置上下文。重置上下文请发送 /reset。</p>
+              <a href="/docs" target="_blank" rel="noopener noreferrer">API 文档</a>
+            </div>
+          </details>
         </div>
       </header>
-      <section class="messages" id="messages" aria-live="polite"></section>
+      <section class="messages" id="messages" aria-label="对话消息" aria-live="polite"></section>
       <section class="composer">
-        <div class="advanced">
-          <div class="field">
-            <label for="chat-id">会话 ID</label>
-            <input id="chat-id" placeholder="比如 demo 或 my-session" />
+        <div class="composer-inner">
+          <div class="run-controls" id="run-controls" {('' if supports_progress else 'hidden')}>
+            <details class="run-progress">
+              <summary><strong id="run-stage">尚未开始任务</strong><span id="run-time">已耗时 0 秒 / 预算 10 分钟</span></summary>
+              <div class="progress-detail" id="run-message" role="status" aria-live="polite">显示实际执行进度，不是逐字输出。</div>
+            </details>
+            <button class="ghost compact" id="cancel-run-btn" type="button" disabled>取消任务</button>
+            <button class="ghost compact" id="resume-progress-btn" type="button" hidden>重新连接</button>
           </div>
-          <div class="field">
-            <label for="auth-token">Bearer Token（可选）</label>
-            <input id="auth-token" placeholder="服务启用鉴权时在这里填" />
+          <div class="composer-box">
+            <label class="sr-only" for="message-input">消息</label>
+            <textarea id="message-input" rows="2" placeholder="继续提问，或粘贴需要分析的内容…"></textarea>
+            <div class="attachment-preview" id="attachment-preview"></div>
+            <div class="composer-actions">
+              <div class="input-tools">
+                <label class="attach-button" {('' if supports_images else 'hidden')} title="PNG / JPEG / WebP，最多 4 张，每张 5 MB">
+                  <span>添加图片</span>
+                  <input type="file" id="image-input" aria-label="添加图片" accept="image/png,image/jpeg,image/webp" multiple />
+                </label>
+                <button class="ghost compact" id="clear-images-btn" type="button" hidden>清除图片</button>
+                <span class="keyboard-hint">Enter 发送 · Shift + Enter 换行</span>
+              </div>
+              <button class="primary" id="send-btn" type="button">发送</button>
+            </div>
           </div>
-        </div>
-        <div class="composer-row">
-          <div class="field">
-            <label for="message-input">消息</label>
-            <textarea id="message-input" placeholder="输入一条消息，按 Enter 发送，Shift+Enter 换行"></textarea>
-          </div>
-          <button class="primary" id="send-btn" type="button">发送</button>
-        </div>
-        <div style="{('' if supports_images else 'display:none')}">
-          <label for="image-input">图片附件（PNG / JPEG / WebP，最多 4 张，每张 5 MB）</label>
-          <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp" multiple />
-          <div class="attachment-preview" id="attachment-preview"></div>
-          <button class="ghost" id="clear-images-btn" type="button" hidden>清除图片</button>
-        </div>
-        <div class="composer-note" id="composer-note">
-          {("当前服务启用了鉴权，页面已为你保留 Token 输入框。" if auth_enabled else "当前服务未启用鉴权，可以直接开始聊天。")}
         </div>
       </section>
     </main>
   </div>
   <script>
     const AUTH_REQUIRED = {auth_flag};
-    const STORAGE_KEYS = {{
-      chatId: "xclaw.chat_id",
-      token: "xclaw.auth_token"
+    const SUPPORTS_PROGRESS = {json.dumps(supports_progress)};
+    const SUPPORTS_RECEIPTS = {json.dumps(supports_receipts)};
+    const POLL_INTERVAL_MS = 1500;
+    const POLL_TIMEOUT_MS = 8000;
+    const MAX_POLLS = 600;
+    const MAX_POLL_FAILURES = 4;
+    const MISSING_SUBMISSION_CHECKS = 4;
+    const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+    const ACTIVE = new Set(["queued", "running", "waiting_input"]);
+    const STATUS_LABELS = {{
+      idle: "准备就绪", queued: "排队中", running: "执行中", waiting_input: "等待补充信息",
+      completed: "任务已完成", failed: "任务失败", cancelled: "任务已取消"
     }};
-
+    const STORAGE_KEYS = {{chatId: "xclaw.chat_id", token: "xclaw.auth_token"}};
     const messagesEl = document.getElementById("messages");
     const chatIdInput = document.getElementById("chat-id");
     const tokenInput = document.getElementById("auth-token");
     const messageInput = document.getElementById("message-input");
     const sendBtn = document.getElementById("send-btn");
-    const clearBtn = document.getElementById("clear-btn");
     const statusPill = document.getElementById("status-pill");
     const imageInput = document.getElementById("image-input");
     const clearImagesBtn = document.getElementById("clear-images-btn");
     const previewEl = document.getElementById("attachment-preview");
+    const modeInput = document.getElementById("execution-mode");
+    const cancelBtn = document.getElementById("cancel-run-btn");
+    const resumeBtn = document.getElementById("resume-progress-btn");
+    const stageEl = document.getElementById("run-stage");
+    const progressMessageEl = document.getElementById("run-message");
+    const timeEl = document.getElementById("run-time");
+    const drafts = new Map();
+    let active = null;
     let selectedFiles = [];
     let previewUrls = [];
 
-    function clearImages() {{
-      previewUrls.forEach(url => URL.revokeObjectURL(url));
-      previewUrls = [];
-      selectedFiles = [];
-      previewEl.replaceChildren();
-      imageInput.value = "";
-      clearImagesBtn.hidden = true;
+    function stored(storage, key, value) {{
+      try {{
+        if (value === undefined) return storage.getItem(key);
+        storage.setItem(key, value);
+      }} catch (_error) {{ /* Storage may be disabled or full; keep the in-memory draft. */ }}
+      return null;
     }}
 
-    imageInput.addEventListener("change", () => {{
-      const files = Array.from(imageInput.files);
-      clearImages();
-      if (files.length > 4 || files.some(file => file.size > 5 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {{
-        setStatus("请选择最多 4 张 PNG / JPEG / WebP 图片，每张不超过 5 MB");
-        return;
-      }}
-      selectedFiles = files;
+    function current(ctx) {{
+      return active === ctx && chatIdInput.value.trim() === ctx.chatId && tokenInput.value.trim() === ctx.token;
+    }}
+
+    function headers(ctx) {{
+      return ctx.token ? {{"Authorization": "Bearer " + ctx.token}} : {{}};
+    }}
+
+    function setStatus(text) {{ statusPill.textContent = text; }}
+
+    function renderFiles(files) {{
+      previewUrls.forEach(url => URL.revokeObjectURL(url));
+      previewUrls = [];
+      selectedFiles = [...files];
+      previewEl.replaceChildren();
+      imageInput.value = "";
       files.forEach(file => {{
         const preview = document.createElement("img");
         const url = URL.createObjectURL(file);
@@ -521,144 +312,598 @@ def _build_chat_page_html(
         previewEl.appendChild(preview);
       }});
       clearImagesBtn.hidden = !files.length;
-    }});
-    clearImagesBtn.addEventListener("click", clearImages);
+    }}
+
+    function saveDraft(ctx = active) {{
+      if (!ctx?.draftReady) return;
+      const p = ctx.pending;
+      const receipt = p?.requestId && !p.receiptFinished ? {{
+        requestId: p.requestId, fingerprint: p.fingerprint, mode: p.mode, draftText: p.draftText
+      }} : null;
+      const draft = {{text: messageInput.value, files: [...selectedFiles], mode: modeInput.value,
+        receipt, requestFiles: p?.files || []}};
+      drafts.set(ctx.key, draft);
+      if (ctx.draftKey) {{
+        stored(sessionStorage, ctx.draftKey, JSON.stringify({{text: draft.text, mode: draft.mode, receipt}}));
+        if (SUPPORTS_RECEIPTS) stored(localStorage, ctx.draftKey + ".receipt",
+          JSON.stringify(receipt ? {{requestId: receipt.requestId, fingerprint: receipt.fingerprint, mode: receipt.mode}} : null));
+      }}
+    }}
 
     function readImage(file) {{
       return new Promise((resolve, reject) => {{
         const reader = new FileReader();
-        reader.onerror = () => reject(new Error("图片读取失败"));
-        reader.onload = () => resolve({{ name: file.name, media_type: file.type, data: reader.result.split(",")[1] }});
+        reader.onerror = () => reject(new Error("image_read_failed"));
+        reader.onload = () => resolve({{name: file.name, media_type: file.type, data: reader.result.split(",")[1]}});
         reader.readAsDataURL(file);
       }});
     }}
 
-    function makeDefaultChatId() {{
-      return "web-" + Math.random().toString(36).slice(2, 10);
-    }}
-
-    function setStatus(text) {{
-      statusPill.textContent = text;
-    }}
-
     function appendMessage(role, text, attachments = []) {{
+      const followTail = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
       const item = document.createElement("article");
       item.className = "message " + role;
-      item.textContent = text;
+      if (role === "assistant" && window.renderChatMarkdown) {{
+        const content = document.createElement("div");
+        content.className = "markdown";
+        content.innerHTML = window.renderChatMarkdown(text);
+        item.appendChild(content);
+      }} else if (role === "user" && text.length > 1200) {{
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = text.slice(0, 80).replace(/\\s+/g, " ") + "… · 展开原始消息（" + text.length + " 字）";
+        const content = document.createElement("div");
+        content.className = "user-content";
+        content.textContent = text;
+        details.appendChild(summary);
+        details.appendChild(content);
+        item.appendChild(details);
+      }} else item.textContent = text;
       attachments.forEach(attachment => {{
         const img = document.createElement("img");
-        img.src = `data:${{attachment.media_type}};base64,${{attachment.data}}`;
+        img.src = "data:" + attachment.media_type + ";base64," + attachment.data;
         img.alt = attachment.name;
         item.appendChild(img);
       }});
       messagesEl.appendChild(item);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (role === "user") messagesEl.scrollTop = messagesEl.scrollHeight;
+      else if (followTail) messagesEl.scrollTop = Math.max(0, item.offsetTop - messagesEl.offsetTop - 24);
     }}
 
-    function loadPreferences() {{
-      chatIdInput.value = localStorage.getItem(STORAGE_KEYS.chatId) || makeDefaultChatId();
-      tokenInput.value = localStorage.getItem(STORAGE_KEYS.token) || "";
+    function controls(ctx) {{
+      if (!current(ctx)) return;
+      const status = ctx.snapshot?.status;
+      const busy = ctx.syncing || ctx.cancelling || (ctx.pending && !ctx.pending.settled) || ["queued", "running"].includes(status)
+        || (ACTIVE.has(status) && ["reconnecting", "cancelling"].includes(ctx.snapshot?.stage));
+      sendBtn.disabled = Boolean(busy);
+      sendBtn.textContent = busy ? (ctx.observationPaused ? "待确认" : "处理中") : status === "waiting_input" ? "继续" : "发送";
+      imageInput.disabled = Boolean(busy);
+      clearImagesBtn.disabled = Boolean(busy);
+      modeInput.disabled = Boolean(busy || status === "waiting_input");
+      cancelBtn.disabled = ctx.cancelling || ctx.snapshot?.stage === "cancelling" || !ctx.snapshot?.run_id || !ACTIVE.has(status);
+      document.getElementById("release-receipt-btn").hidden = !(ctx.pending?.requestId
+        && ctx.pending.settled && !ctx.pending.receiptFinished);
     }}
 
-    function persistPreferences() {{
-      localStorage.setItem(STORAGE_KEYS.chatId, chatIdInput.value.trim() || makeDefaultChatId());
-      localStorage.setItem(STORAGE_KEYS.token, tokenInput.value.trim());
+    function stopObservation(ctx) {{
+      clearTimeout(ctx.timer);
+      ctx.epoch++;
+      ctx.controller?.abort();
+      ctx.controller = null;
+    }}
+
+    function pauseObservation(ctx, message) {{
+      stopObservation(ctx);
+      ctx.observationPaused = true;
+      resumeBtn.hidden = false;
+      setStatus("进度更新已暂停");
+      stageEl.textContent = "状态待确认";
+      progressMessageEl.textContent = message;
+      controls(ctx);
+    }}
+
+    function replyKey(snapshot) {{
+      return snapshot.run_id + ":" + (snapshot.status === "waiting_input" ? "input:" + snapshot.sequence : "final");
+    }}
+
+    function showReply(ctx, snapshot, reply) {{
+      if (!reply || !snapshot.run_id) return;
+      const key = replyKey(snapshot);
+      if (ctx.delivered.has(key)) return;
+      ctx.delivered.add(key);
+      appendMessage("assistant", reply);
+    }}
+
+    function clearAcceptedDraft(ctx, pending) {{
+      if (messageInput.value === pending.draftText) messageInput.value = "";
+      if (selectedFiles.length === pending.files.length && selectedFiles.every((file, index) => file === pending.files[index])) {{
+        renderFiles([]);
+      }}
+      saveDraft(ctx);
+    }}
+
+    function failSubmission(ctx, pending, message) {{
+      if (pending.settled) return;
+      pending.settled = true;
+      ctx.syncing = false;
+      appendMessage("system", message);
+      setStatus("发送失败");
+      stageEl.textContent = "提交未完成";
+      progressMessageEl.textContent = message;
+      controls(ctx);
+    }}
+
+    function applySnapshot(ctx, snapshot, withHistory = false) {{
+      if (!Object.hasOwn(STATUS_LABELS, snapshot.status)) throw new Error("invalid_snapshot");
+      const pending = ctx.pending;
+      // The first poll after POST may still describe the previous Run. Never finish the new submission with it.
+      if (pending && !pending.runId && !pending.settled) {{
+        const changedRun = snapshot.run_id && snapshot.run_id !== pending.baseRunId;
+        const continuedRun = snapshot.run_id && pending.continuing && snapshot.run_id === pending.baseRunId
+          && snapshot.sequence > pending.baseSequence;
+        if (changedRun || continuedRun) pending.runId = snapshot.run_id;
+        else {{
+          const stablePreviousState = !["queued", "running"].includes(snapshot.status)
+            && !["reconnecting", "cancelling"].includes(snapshot.stage);
+          // A lost POST is not proof of rejection. Give acceptance recovery time,
+          // but do not poll an unchanged previous Run forever or replay the POST.
+          if (pending.transportError && stablePreviousState) {{
+            pending.missingChecks = (pending.missingChecks || 0) + 1;
+            if (pending.missingChecks >= MISSING_SUBMISSION_CHECKS) {{
+              failSubmission(ctx, pending, "连接已恢复，但未确认本次提交对应的新任务。问题和图片已保留；请核对状态后手动重试，也可重新连接再次查询。");
+              setStatus("提交结果未确认");
+              stageEl.textContent = "未确认新任务";
+              resumeBtn.hidden = false;
+              return false;
+            }}
+            setStatus("正在核对提交结果");
+            stageEl.textContent = "确认中";
+            progressMessageEl.textContent = "连接已恢复，正在确认本次提交是否被接收，不会自动重发。";
+          }} else pending.missingChecks = 0;
+          if (pending.httpError && !ACTIVE.has(snapshot.status)) {{
+            failSubmission(ctx, pending, "消息处理失败，草稿和图片已保留，可手动重试。");
+            return false;
+          }}
+          if (pending.httpDone && !["queued", "running"].includes(snapshot.status)
+              && !["reconnecting", "cancelling"].includes(snapshot.stage)) {{
+            failSubmission(ctx, pending, "请求已结束，但未查到新任务进展。草稿和图片已保留，请核对状态后手动重试。");
+            return false;
+          }}
+          return true;
+        }}
+      }}
+      if (pending && !pending.settled && pending.runId && pending.runId !== snapshot.run_id) return true;
+      if (ctx.snapshot && ctx.snapshot.run_id === snapshot.run_id && snapshot.sequence < ctx.snapshot.sequence) return true;
+      if (ctx.finishedRuns.has(snapshot.run_id) && !TERMINAL.has(snapshot.status)) return false;
+      ctx.snapshot = snapshot;
+      ctx.syncing = false;
+      if (ACTIVE.has(snapshot.status) && [180000, 600000].includes(snapshot.wall_time_ms)) {{
+        modeInput.value = snapshot.wall_time_ms === 180000 ? "standard" : "analysis";
+      }}
+
+      if (withHistory && !ctx.historyLoaded) {{
+        ctx.historyLoaded = true;
+        messagesEl.replaceChildren();
+        const history = (snapshot.messages || []).filter(item => ["user", "assistant"].includes(item.role) && typeof item.content === "string");
+        history.forEach(item => appendMessage(item.role, item.content));
+        const lastItem = messagesEl.lastElementChild;
+        if (lastItem) messagesEl.scrollTop = Math.max(0, lastItem.offsetTop - messagesEl.offsetTop - 24);
+        const last = history.at(-1);
+        if (last?.role === "assistant" && (!last.run_id || last.run_id === snapshot.run_id)
+            && snapshot.reply && last.content === snapshot.reply) {{
+          ctx.delivered.add(replyKey(snapshot));
+        }}
+      }}
+
+      setStatus(STATUS_LABELS[snapshot.status]);
+      stageEl.textContent = ({{idle:"准备就绪",queued:"已接收",model:"分析中",tool:"查询中",finalizing:"整理结论",waiting_input:"待补充",completed:"已完成",failed:"未完成",cancelled:"已取消",cancelling:"取消中",reconnecting:"正在重新连接"}})[snapshot.stage] || STATUS_LABELS[snapshot.status];
+      progressMessageEl.textContent = snapshot.message || STATUS_LABELS[snapshot.status];
+      const budget = snapshot.wall_time_ms || (pending?.mode === "standard" || modeInput.value === "standard" ? 180000 : 600000);
+      timeEl.textContent = (snapshot.elapsed_seconds == null ? "耗时未记录" : "已耗时 " + Math.floor(snapshot.elapsed_seconds) + " 秒") + " / 预算 " + (budget / 60000) + " 分钟";
+
+      const ended = TERMINAL.has(snapshot.status) || (snapshot.status === "waiting_input"
+        && !["reconnecting", "cancelling"].includes(snapshot.stage));
+      if (ended) {{
+        const matching = pending && pending.runId === snapshot.run_id;
+        if (matching && !pending.settled) {{
+          pending.settled = true;
+          if (["completed", "waiting_input"].includes(snapshot.status)) clearAcceptedDraft(ctx, pending);
+        }}
+        showReply(ctx, snapshot, snapshot.reply);
+        if (TERMINAL.has(snapshot.status)) ctx.finishedRuns.add(snapshot.run_id);
+      }}
+      controls(ctx);
+      // Terminal state and persisted reply can become visible on adjacent reads.
+      if (snapshot.status === "completed" && !snapshot.reply) {{
+        ctx.replyAttempts = (ctx.replyAttempts || 0) + 1;
+        if (ctx.replyAttempts < 8) return true;
+        progressMessageEl.textContent = "任务已完成，终答尚未同步。请重新连接，不要重新发送。";
+        resumeBtn.hidden = false;
+      }} else ctx.replyAttempts = 0;
+      return !ended && snapshot.status !== "idle";
+    }}
+
+    function applyReceipt(ctx, result) {{
+      const pending = ctx.pending;
+      if (!pending || result.request_id !== pending.requestId) throw new Error("receipt_mismatch");
+      ctx.syncing = false;
+      if (result.status === "not_found") {{
+        if (pending.httpInFlight) return true;
+        pending.settled = true;
+        setStatus("未找到提交回执");
+        stageEl.textContent = "尚未确认接收";
+        progressMessageEl.textContent = "服务器未找到本次回执。草稿已保留；手动重试相同内容会复用原提交 ID，不会另建重复请求。";
+        resumeBtn.hidden = false;
+      }} else if (result.status === "interrupted") {{
+        pending.settled = true;
+        setStatus("提交中断待确认");
+        stageEl.textContent = "执行结果待确认";
+        progressMessageEl.textContent = result.message;
+        resumeBtn.hidden = false;
+        if (!pending.warned) {{ appendMessage("system", result.message); pending.warned = true; }}
+      }} else if (["processing", "completed", "failed"].includes(result.status)) {{
+        const done = result.status !== "processing";
+        if (result.progress && (!TERMINAL.has(result.progress.status) || done)) {{
+          pending.runId = result.progress.run_id;
+          applySnapshot(ctx, result.progress);
+        }}
+        if (done) {{
+          pending.settled = true;
+          pending.receiptFinished = true;
+          if (!result.progress && !pending.replyRendered) {{
+            const last = messagesEl.lastElementChild;
+            if (!(pending.restored && last?.className === "message assistant"
+                && last.textContent.trim() === result.reply?.trim())) {{
+              appendMessage("assistant", result.reply || "请求已结束，但没有可展示的回复。");
+            }}
+            pending.replyRendered = true;
+          }}
+          if (result.status === "completed") clearAcceptedDraft(ctx, pending);
+          else saveDraft(ctx);
+          if (!result.progress) {{
+            setStatus(result.status === "completed" ? "响应完成" : "任务未完成");
+            stageEl.textContent = result.status === "completed" ? "已处理" : "未完成";
+            timeEl.textContent = "";
+            progressMessageEl.textContent = "已按提交回执确认结果。";
+          }}
+        }} else {{
+          pending.settled = false;
+          if (!result.progress || TERMINAL.has(result.progress.status)) {{
+            setStatus("请求已接收");
+            stageEl.textContent = "确认执行结果";
+            progressMessageEl.textContent = result.message || "正在等待原任务的持久化回复，不会重新执行。";
+          }}
+        }}
+        controls(ctx);
+        return !done;
+      }} else throw new Error("invalid_receipt");
+      saveDraft(ctx);
+      controls(ctx);
+      return false;
+    }}
+
+    async function pollProgress(ctx, epoch) {{
+      if (!current(ctx) || epoch !== ctx.epoch) return;
+      if (++ctx.attempts > MAX_POLLS) {{
+        pauseObservation(ctx, "本次进度查询已达上限。任务未被取消，点击重新连接可继续查看；不会重新发送消息。");
+        return;
+      }}
+      const controller = new AbortController();
+      ctx.controller = controller;
+      const timeout = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+      let again = false;
+      try {{
+        const restoreReceiptHistory = Boolean(SUPPORTS_PROGRESS && !ctx.historyLoaded && ctx.pending?.requestId);
+        const withHistory = !ctx.historyLoaded && (!ctx.pending || restoreReceiptHistory);
+        const byReceipt = ctx.pending?.requestId && !ctx.pending.receiptFinished && !restoreReceiptHistory;
+        const query = new URLSearchParams({{chat_id: ctx.chatId, include_history: String(withHistory)}});
+        const path = byReceipt ? "/api/chat/receipts/" + ctx.pending.requestId : "/api/chat/progress";
+        const response = await fetch(path + "?" + query, {{
+          headers: headers(ctx), cache: "no-store", signal: controller.signal
+        }});
+        if (!response.ok && !(byReceipt && response.status === 404)) {{
+          const error = new Error("progress_unavailable");
+          error.status = response.status;
+          throw error;
+        }}
+        const snapshot = await response.json();
+        if (!current(ctx) || epoch !== ctx.epoch) return;
+        ctx.failures = 0;
+        ctx.observationPaused = false;
+        resumeBtn.hidden = true;
+        if (byReceipt) again = applyReceipt(ctx, snapshot);
+        else if (restoreReceiptHistory) {{
+          const pending = ctx.pending;
+          ctx.pending = null;
+          try {{ applySnapshot(ctx, snapshot, true); }} finally {{ ctx.pending = pending; }}
+          controls(ctx);
+          again = true;
+        }} else again = applySnapshot(ctx, snapshot, withHistory);
+      }} catch (error) {{
+        if (!current(ctx) || epoch !== ctx.epoch) return;
+        if (ctx.pending) ctx.pending.missingChecks = 0;
+        const denied = [401, 403, 501].includes(error.status);
+        if (denied || ++ctx.failures >= MAX_POLL_FAILURES) {{
+          pauseObservation(ctx, denied ? "无法读取进度，请检查 Token 和后端能力后重新连接。" : "无法连接聊天服务，当前提交和任务状态尚未确认。请重新连接核对，不要重复发送。");
+          return;
+        }}
+        setStatus("正在恢复进度连接");
+        progressMessageEl.textContent = "仅重试进度查询，不会重新发送消息。";
+        again = true;
+      }} finally {{
+        clearTimeout(timeout);
+        if (ctx.controller === controller) ctx.controller = null;
+      }}
+      if (again && current(ctx) && epoch === ctx.epoch) {{
+        ctx.timer = setTimeout(() => pollProgress(ctx, epoch), POLL_INTERVAL_MS);
+      }}
+    }}
+
+    function observe(ctx) {{
+      if (!(SUPPORTS_PROGRESS || SUPPORTS_RECEIPTS) || !current(ctx)) return;
+      stopObservation(ctx);
+      ctx.observationPaused = false;
+      ctx.attempts = 0;
+      ctx.failures = 0;
+      ctx.replyAttempts = 0;
+      resumeBtn.hidden = true;
+      void pollProgress(ctx, ctx.epoch);
+    }}
+
+    async function openChat() {{
+      if (active) {{
+        saveDraft(active);
+        stopObservation(active);
+        active.cancelController?.abort();
+      }}
+      const chatId = chatIdInput.value.trim();
+      const token = tokenInput.value.trim();
+      const ctx = {{
+        chatId, token, key: JSON.stringify([chatId, token]), epoch: 0, snapshot: null, pending: null,
+        delivered: new Set(), finishedRuns: new Set(), historyLoaded: false, syncing: true, cancelling: false
+      }};
+      active = ctx;
+      controls(ctx);
+      messagesEl.replaceChildren();
+      renderFiles([]);
+      messageInput.value = "";
+      messageInput.disabled = true;
+      modeInput.value = "analysis";
+      stageEl.textContent = "尚未开始任务";
+      progressMessageEl.textContent = "正在查询会话，不会重发消息。";
+      timeEl.textContent = "已耗时 0 秒 / 预算 10 分钟";
+      resumeBtn.hidden = true;
+      stored(localStorage, STORAGE_KEYS.chatId, chatId);
+      stored(localStorage, STORAGE_KEYS.token, token);
+      // Persist text only, scoped to chat AND credentials; never put a token or image in a storage key.
+      try {{
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ctx.key));
+        ctx.draftKey = "xclaw.draft." + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      }} catch (_error) {{ /* Non-secure origins still retain drafts in memory. */ }}
+      if (!current(ctx)) return;
+      let saved = drafts.get(ctx.key);
+      if (!saved && ctx.draftKey) {{
+        try {{ saved = JSON.parse(stored(sessionStorage, ctx.draftKey) || "null"); }} catch (_error) {{}}
+      }}
+      messageInput.value = saved?.text || "";
+      messageInput.disabled = false;
+      ctx.draftReady = true;
+      modeInput.value = saved?.mode === "standard" ? "standard" : "analysis";
+      renderFiles(saved?.files || []);
+      let receipt = saved?.receipt;
+      if (!receipt && SUPPORTS_RECEIPTS && ctx.draftKey) {{
+        try {{ receipt = JSON.parse(stored(localStorage, ctx.draftKey + ".receipt") || "null"); }} catch (_error) {{}}
+      }}
+      if (SUPPORTS_RECEIPTS && /^[a-f0-9]{{32}}$/.test(receipt?.requestId || "")) {{
+        ctx.pending = {{...receipt, files: saved?.requestFiles || [], restored: true, settled: false}};
+      }}
+      ctx.syncing = SUPPORTS_PROGRESS || Boolean(ctx.pending);
+      controls(ctx);
+      if ((SUPPORTS_PROGRESS || ctx.pending) && chatId && (!AUTH_REQUIRED || token)) {{
+        setStatus("正在恢复会话");
+        observe(ctx);
+      }} else {{
+        ctx.syncing = false;
+        controls(ctx);
+        setStatus(AUTH_REQUIRED && !token ? "需要 Bearer Token" : "准备就绪");
+        appendMessage("system", SUPPORTS_PROGRESS ? "填好会话 ID 和 Token 后重新连接。" : "页面已就绪，可以开始聊天。");
+      }}
     }}
 
     async function sendMessage() {{
-      if (sendBtn.disabled) return;
+      const ctx = active;
+      if (!ctx || !current(ctx) || sendBtn.disabled) return;
       const message = messageInput.value.trim() || (selectedFiles.length ? "请描述图片内容。" : "");
-      const files = [...selectedFiles];
-      const chatId = chatIdInput.value.trim();
-      const token = tokenInput.value.trim();
-
-      if (!message) {{
-        setStatus("先输入消息");
-        messageInput.focus();
-        return;
-      }}
-      if (!chatId) {{
-        setStatus("先填会话 ID");
-        chatIdInput.focus();
-        return;
-      }}
-      if (AUTH_REQUIRED && !token) {{
-        setStatus("需要 Bearer Token");
-        tokenInput.focus();
-        return;
-      }}
-
-      persistPreferences();
-      sendBtn.disabled = true;
-      imageInput.disabled = true;
-      clearImagesBtn.disabled = true;
-      setStatus("正在请求模型...");
-
-      const headers = {{
-        "Content-Type": "application/json"
+      if (!message) {{ setStatus("先输入消息或选择图片"); return; }}
+      if (!ctx.chatId) {{ setStatus("先填会话 ID"); return; }}
+      if (AUTH_REQUIRED && !ctx.token) {{ setStatus("需要 Bearer Token"); return; }}
+      const prior = ctx.pending;
+      const pending = {{
+        message, draftText: messageInput.value, files: [...selectedFiles], mode: modeInput.value,
+        baseRunId: ctx.snapshot?.run_id, baseSequence: ctx.snapshot?.sequence || 0,
+        continuing: ctx.snapshot?.status === "waiting_input", runId: null, settled: false
       }};
-      if (token) {{
-        headers["Authorization"] = `Bearer ${{token}}`;
-      }}
-
+      ctx.pending = pending;
+      saveDraft(ctx);
+      controls(ctx);
+      setStatus("正在提交");
+      stageEl.textContent = "提交中";
+      progressMessageEl.textContent = "正在等待服务器确认本次提交。";
+      timeEl.textContent = "本轮耗时待确认";
+      let posted = false;
       try {{
-        const attachments = await Promise.all(files.map(readImage));
-        appendMessage("user", message, attachments);
-        messageInput.value = "";
-        clearImages();
-        const response = await fetch("/api/chat", {{
-          method: "POST",
-          headers,
-          body: JSON.stringify({{ chat_id: chatId, message, attachments }})
-        }});
-
-        if (!response.ok) {{
-          let detail = `HTTP ${{response.status}}`;
-          try {{
-            const data = await response.json();
-            detail = data.detail || detail;
-          }} catch (_err) {{
+        const attachments = await Promise.all(pending.files.map(readImage));
+        if (!current(ctx) || ctx.pending !== pending) return;
+        const payload = {{chat_id: ctx.chatId, message, attachments}};
+        if (SUPPORTS_PROGRESS) payload.execution_mode = pending.mode;
+        if (SUPPORTS_RECEIPTS) {{
+          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(payload)));
+          if (!current(ctx) || ctx.pending !== pending) return;
+          pending.fingerprint = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+          if (prior?.requestId && !prior.receiptFinished && prior.fingerprint !== pending.fingerprint) {{
+            ctx.pending = prior;
+            setStatus("请先核对原提交");
+            progressMessageEl.textContent = "仍有未确认的提交。重试须保持原文字、模式和图片；如要开始新请求，请先在设置中结束本次提交核对。";
+            saveDraft(ctx);
+            controls(ctx);
+            return;
           }}
-          throw new Error(detail);
+          pending.requestId = prior?.requestId && !prior.receiptFinished && prior.fingerprint === pending.fingerprint
+            ? prior.requestId : crypto.randomUUID().replaceAll("-", "");
+          payload.request_id = pending.requestId;
+          saveDraft(ctx);
+          pending.httpInFlight = true;
         }}
-
+        appendMessage("user", message, attachments);
+        // POST is issued exactly once. A lost response is recovered only via GET.
+        const request = fetch("/api/chat", {{
+          method: "POST", headers: {{...headers(ctx), "Content-Type": "application/json"}}, body: JSON.stringify(payload)
+        }});
+        posted = true;
+        observe(ctx);
+        const response = await request;
+        if (!current(ctx) || ctx.pending !== pending) return;
+        pending.httpInFlight = false;
+        if (!response.ok) {{
+          if (pending.settled) return;
+          pending.httpError = true;
+          if (!SUPPORTS_PROGRESS || (response.status < 500 && !pending.runId)) {{
+            stopObservation(ctx);
+            failSubmission(ctx, pending, response.status === 401 ? "鉴权失败，请检查 Token。草稿和图片已保留。" : "发送失败，请检查消息或图片后手动重试。草稿和图片已保留。");
+          }} else {{
+            progressMessageEl.textContent = "消息处理失败，正在核对任务状态。草稿和图片已保留。";
+            observe(ctx);
+          }}
+          return;
+        }}
         const data = await response.json();
-        appendMessage("assistant", data.reply || "(空回复)");
-        setStatus("响应完成");
-      }} catch (error) {{
-        appendMessage("system", `请求失败：${{error.message}}`);
-        setStatus("请求失败");
-      }} finally {{
-        sendBtn.disabled = false;
-        imageInput.disabled = false;
-        clearImagesBtn.disabled = false;
-        messageInput.focus();
+        if (!current(ctx) || ctx.pending !== pending) return;
+        pending.httpDone = true;
+        pending.httpReply = data.reply || "";
+        if (pending.requestId) {{
+          if (data.request_id !== pending.requestId || data.status !== "accepted") throw new Error("invalid_receipt_ack");
+          observe(ctx);
+        }} else if (SUPPORTS_PROGRESS && data.delivery === "direct" && typeof data.reply === "string" && data.reply.trim()) {{
+          // Local operations complete without a Run. Invalidate pre-operation polls,
+          // then refresh the baseline before accepting another submission.
+          stopObservation(ctx);
+          pending.settled = true;
+          ctx.snapshot = null;
+          ctx.syncing = true;
+          appendMessage("assistant", pending.httpReply);
+          clearAcceptedDraft(ctx, pending);
+          setStatus("响应完成");
+          stageEl.textContent = "已处理";
+          progressMessageEl.textContent = pending.httpReply;
+          controls(ctx);
+          observe(ctx);
+        }} else if (!SUPPORTS_PROGRESS) {{
+          pending.settled = true;
+          appendMessage("assistant", pending.httpReply || "(空回复)");
+          clearAcceptedDraft(ctx, pending);
+          setStatus("响应完成");
+          controls(ctx);
+        }} else if (pending.runId && ctx.snapshot?.run_id === pending.runId) {{
+          applySnapshot(ctx, ctx.snapshot);
+        }}
+      }} catch (_error) {{
+        pending.httpInFlight = false;
+        if (!current(ctx) || ctx.pending !== pending || pending.settled) return;
+        if (posted && (SUPPORTS_PROGRESS || SUPPORTS_RECEIPTS)) {{
+          pending.transportError = true;
+          setStatus("发送结果待确认");
+          progressMessageEl.textContent = "连接中断，提交结果尚未确认。仅查询原任务，不会自动重发；草稿和图片已保留。";
+          // The existing observer remains bounded, even after the message connection fails.
+          resumeBtn.hidden = false;
+        }} else {{
+          failSubmission(ctx, pending, posted ? "连接失败，草稿和图片已保留，请手动重试。" : "图片读取失败，草稿和图片已保留，请手动重试。");
+        }}
       }}
     }}
 
-    sendBtn.addEventListener("click", sendMessage);
-    clearBtn.addEventListener("click", () => {{
-      messagesEl.innerHTML = "";
-      appendMessage("system", "消息区已清空。你可以继续使用相同的会话 ID，也可以改成新的。");
-      setStatus("已清空");
+    async function cancelRun() {{
+      const ctx = active;
+      if (!ctx || !current(ctx) || cancelBtn.disabled) return;
+      const runId = ctx.snapshot.run_id;
+      ctx.cancelling = true;
+      stopObservation(ctx);
+      controls(ctx);
+      const controller = new AbortController();
+      ctx.cancelController = controller;
+      const timeout = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+      progressMessageEl.textContent = "正在请求取消，等待后端确认。";
+      try {{
+        const response = await fetch("/api/chat/cancel", {{
+          method: "POST", headers: {{...headers(ctx), "Content-Type": "application/json"}},
+          body: JSON.stringify({{chat_id: ctx.chatId, run_id: runId}}), signal: controller.signal
+        }});
+        if (!response.ok) throw new Error("cancel_unconfirmed");
+        const snapshot = await response.json();
+        if (!current(ctx) || ctx.snapshot?.run_id !== runId) return;
+        if (snapshot.run_id === runId) applySnapshot(ctx, snapshot);
+        if (!TERMINAL.has(ctx.snapshot.status)) observe(ctx);
+        else stopObservation(ctx);
+      }} catch (_error) {{
+        if (!current(ctx)) return;
+        progressMessageEl.textContent = "取消未确认。请重新连接核对任务状态，也可以手动重试取消。";
+        observe(ctx);
+      }} finally {{
+        clearTimeout(timeout);
+        ctx.cancelling = false;
+        controls(ctx);
+      }}
+    }}
+
+    imageInput.addEventListener("change", () => {{
+      const files = Array.from(imageInput.files);
+      if (files.length > 4 || files.some(file => file.size > 5 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {{
+        imageInput.value = "";
+        setStatus("请选择最多 4 张 PNG / JPEG / WebP 图片，每张不超过 5 MB；原有图片已保留");
+        return;
+      }}
+      renderFiles(files);
+      saveDraft();
     }});
-    chatIdInput.addEventListener("change", persistPreferences);
-    tokenInput.addEventListener("change", persistPreferences);
-    messageInput.addEventListener("keydown", (event) => {{
-      if (event.key === "Enter" && !event.shiftKey) {{
+    clearImagesBtn.addEventListener("click", () => {{ renderFiles([]); saveDraft(); }});
+    messageInput.addEventListener("input", () => saveDraft());
+    modeInput.addEventListener("change", () => {{
+      saveDraft();
+      timeEl.textContent = "已耗时 0 秒 / 预算 " + (modeInput.value === "standard" ? 3 : 10) + " 分钟";
+    }});
+    sendBtn.addEventListener("click", sendMessage);
+    cancelBtn.addEventListener("click", cancelRun);
+    resumeBtn.addEventListener("click", () => observe(active));
+    document.getElementById("clear-btn").addEventListener("click", () => {{
+      messagesEl.replaceChildren();
+      appendMessage("system", "消息区已清空，不会取消任务或删除服务端历史。");
+    }});
+    document.getElementById("release-receipt-btn").addEventListener("click", () => {{
+      if (!active?.pending?.settled || !window.confirm("这不会取消已经执行的操作。确认已核对原提交，允许下一次发送使用新的提交 ID？")) return;
+      active.pending = null;
+      saveDraft(active);
+      controls(active);
+      setStatus("已结束提交核对");
+    }});
+    chatIdInput.addEventListener("change", openChat);
+    tokenInput.addEventListener("change", openChat);
+    messageInput.addEventListener("keydown", event => {{
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {{
         event.preventDefault();
-        sendMessage();
+        void sendMessage();
       }}
     }});
-
-    loadPreferences();
-    appendMessage(
-      "system",
-      AUTH_REQUIRED
-        ? "页面已就绪。这个服务启用了鉴权，如果你还没填 Bearer Token，请先填右下方输入框。"
-        : "页面已就绪。直接发一条消息试试，比如“你好，介绍一下你自己”。"
-    );
-    setStatus("页面已连接");
+    window.addEventListener("online", () => {{ if (SUPPORTS_PROGRESS && active) observe(active); }});
+    window.addEventListener("pagehide", () => {{ saveDraft(); if (active) stopObservation(active); }});
+    window.addEventListener("keydown", event => {{
+      if (event.key === "Escape") document.getElementById("chat-settings").open = false;
+    }});
+    window.addEventListener("click", event => {{
+      const settings = document.getElementById("chat-settings");
+      if (settings.open && !settings.contains(event.target)) settings.open = false;
+    }});
+    chatIdInput.value = stored(localStorage, STORAGE_KEYS.chatId) || "web-" + Math.random().toString(36).slice(2, 10);
+    tokenInput.value = stored(localStorage, STORAGE_KEYS.token) || "";
+    void openChat();
   </script>
 </body>
 </html>
@@ -856,6 +1101,10 @@ def create_web_app(
     tool_registry: Any = None,
     oauth_manager: Any = None,
     supports_images: bool = False,
+    progress_handler: Callable[..., Coroutine[Any, Any, dict]] | None = None,
+    cancel_handler: Callable[..., Coroutine[Any, Any, dict]] | None = None,
+    startup_handler: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    readiness_handler: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -870,13 +1119,33 @@ def create_web_app(
                          isolated session namespace, preventing cross-user
                          data access on the web channel.
         tool_registry:   Optional ToolRegistry instance (for MCP server mode)
+        progress_handler: async (effective_chat_id, include_history=False) -> public snapshot
+        cancel_handler:  async (effective_chat_id, run_id) -> public snapshot
     """
-    app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs")
+    @asynccontextmanager
+    async def lifespan(app):
+        if startup_handler is not None:
+            await startup_handler()
+        try:
+            yield
+        finally:
+            tasks = list(chat_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="XClaw", version="0.1.0", docs_url="/docs", lifespan=lifespan)
     app.add_middleware(ChatBodyLimitMiddleware)
+    # Keep detached work alive even when the request task/browser goes away.
+    chat_tasks: set[asyncio.Task] = set()
+    app.state.chat_tasks = chat_tasks
+    receipts = ReceiptStore(db) if isinstance(getattr(db, "_path", None), Path) else None
+    app.state.receipts = receipts
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError):
-        if request.url.path not in {"/api/chat", "/api/chat/stream"}:
+        if request.url.path not in {"/api/chat", "/api/chat/stream", "/api/chat/progress", "/api/chat/cancel"}:
             return await request_validation_exception_handler(request, error)
         # Validation errors must not echo an uploaded private image as base64.
         return JSONResponse(status_code=422, content={"detail": [
@@ -925,6 +1194,15 @@ def create_web_app(
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
+    @app.get("/chat-assets/{name}", include_in_schema=False)
+    async def chat_asset(name: str) -> FileResponse:
+        if name not in {"chat.css", "markdown-it.min.js", "markdown.js"}:
+            raise HTTPException(status_code=404)
+        return FileResponse(
+            Path(__file__).with_name("static") / name,
+            headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+        )
+
     @app.get("/", response_class=HTMLResponse)
     async def chat_page() -> HTMLResponse:
         model_name = getattr(settings, "model", "unknown") if settings else "unknown"
@@ -935,6 +1213,8 @@ def create_web_app(
                 model_name=model_name,
                 provider_name=provider_name,
                 supports_images=supports_images,
+                supports_progress=progress_handler is not None,
+                supports_receipts=receipts is not None,
             )
         )
 
@@ -946,25 +1226,131 @@ def create_web_app(
     async def health() -> dict[str, str]:
         return {"status": "ok", "service": "xclaw"}
 
-    @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_token)])
+    @app.get("/health/ready", include_in_schema=False)
+    async def ready() -> JSONResponse:
+        try:
+            if db is not None:
+                await db.conn.execute("SELECT 1")
+            if readiness_handler:
+                async with asyncio.timeout(3):
+                    await readiness_handler()
+            return JSONResponse({"status": "ready"})
+        except Exception:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+
+    @app.post("/api/chat", response_model=ChatResponse, response_model_exclude_none=True, dependencies=[Depends(verify_token)])
     async def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
         """Non-streaming chat endpoint."""
         effective_id = _effective_chat_id(req.chat_id, authorization)
         if req.attachments and not supports_images:
             raise HTTPException(status_code=400, detail="当前执行后端未启用图片输入")
+        options = {"attachments": req.attachments} if req.attachments else {}
+        if req.execution_mode is not None:
+            options["execution_mode"] = req.execution_mode
+
+        if req.request_id is not None:
+            if receipts is None:
+                raise HTTPException(status_code=501, detail="当前服务未启用持久化回执")
+            scope = receipts.scope(effective_id, _extract_token(authorization))
+            try:
+                receipt, created = await receipts.admit(
+                    scope, req.request_id, req.model_dump(exclude={"request_id"}),
+                )
+            except ReceiptConflict:
+                raise HTTPException(status_code=409, detail="同一提交 ID 不能用于不同内容") from None
+            if created:
+                task = asyncio.create_task(receipts.execute(
+                    receipt, lambda: message_handler(effective_id, req.message, **options),
+                ))
+                chat_tasks.add(task)
+                task.add_done_callback(chat_tasks.discard)
+            return JSONResponse(
+                {"request_id": req.request_id, "status": "accepted"},
+                status_code=202, headers={"Cache-Control": "no-store"},
+            )
+
+        async def execute_message() -> ChatResponse:
+            try:
+                reply = await message_handler(effective_id, req.message, **options)
+                return ChatResponse(chat_id=effective_id, reply=reply,
+                                    delivery="direct" if isinstance(reply, DirectReply) else None)
+            except Exception:
+                logger.error("Chat endpoint failed; private exception details withheld")
+                raise HTTPException(status_code=500, detail="消息处理失败，请查看任务状态后再重试") from None
+
+        def release_task(task: asyncio.Task) -> None:
+            chat_tasks.discard(task)
+            if not task.cancelled():
+                task.exception()  # Retrieve failures even if the request no longer awaits them.
+
+        task = asyncio.create_task(execute_message())
+        chat_tasks.add(task)
+        task.add_done_callback(release_task)
+        return await asyncio.shield(task)
+
+    @app.get("/api/chat/receipts/{request_id}", dependencies=[Depends(verify_token)])
+    async def chat_receipt(request_id: str, chat_id: str = "web_default",
+                           authorization: str = Header(default="")) -> JSONResponse:
+        import re
+
+        if receipts is None:
+            raise HTTPException(status_code=501, detail="当前服务未启用持久化回执")
+        if not re.fullmatch(REQUEST_ID_PATTERN, request_id):
+            raise HTTPException(status_code=400, detail="无效提交 ID")
+        effective_id = _effective_chat_id(chat_id, authorization)
+        receipt = await receipts.lookup(
+            receipts.scope(effective_id, _extract_token(authorization)), request_id,
+        )
+        if receipt is None:
+            return JSONResponse({"request_id": request_id, "status": "not_found"},
+                                status_code=404, headers={"Cache-Control": "no-store"})
         try:
-            options = {"attachments": req.attachments} if req.attachments else {}
-            reply = await message_handler(effective_id, req.message, **options)
-            return ChatResponse(chat_id=effective_id, reply=reply)
-        except Exception as exc:
-            logger.error(f"Chat endpoint error: {exc}")
-            raise HTTPException(status_code=500, detail=str(exc))
+            result = await receipts.project(
+                receipt, (lambda: progress_handler(effective_id, include_history=False))
+                if progress_handler else None,
+            )
+            if result.get("progress"):
+                result["progress"] = _public_chat_progress(result["progress"])
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except Exception:
+            logger.error("Chat receipt query failed; private exception details withheld")
+            raise HTTPException(status_code=503, detail="回执暂时无法查询，请重新连接，不要换 ID 重发") from None
+
+    @app.get("/api/chat/progress", dependencies=[Depends(verify_token)])
+    async def chat_progress(
+        chat_id: str = "web_default", include_history: bool = False,
+        authorization: str = Header(default=""),
+    ) -> JSONResponse:
+        if progress_handler is None:
+            raise HTTPException(status_code=501, detail="当前执行后端不支持任务进度")
+        try:
+            snapshot = await progress_handler(
+                _effective_chat_id(chat_id, authorization), include_history=include_history,
+            )
+            public = _public_chat_progress(snapshot, include_history=include_history)
+            return JSONResponse(public, headers={"Cache-Control": "no-store"})
+        except Exception:
+            logger.error("Chat progress failed; private exception details withheld")
+            raise HTTPException(status_code=500, detail="任务进度暂时不可用，请重新连接，不要重复发送") from None
+
+    @app.post("/api/chat/cancel", dependencies=[Depends(verify_token)])
+    async def chat_cancel(req: ChatCancelRequest, authorization: str = Header(default="")) -> JSONResponse:
+        if cancel_handler is None:
+            raise HTTPException(status_code=501, detail="当前执行后端不支持取消任务")
+        try:
+            snapshot = await cancel_handler(_effective_chat_id(req.chat_id, authorization), req.run_id)
+            return JSONResponse(_public_chat_progress(snapshot), headers={"Cache-Control": "no-store"})
+        except Exception:
+            logger.error("Chat cancellation failed; private exception details withheld")
+            raise HTTPException(status_code=500, detail="取消未确认，请查看任务状态后再重试") from None
 
     @app.post("/api/chat/stream", dependencies=[Depends(verify_token)])
     async def chat_stream(
         req: ChatRequest, authorization: str = Header(default="")
     ) -> EventSourceResponse:
         """SSE streaming chat endpoint."""
+        if req.request_id is not None:
+            raise HTTPException(status_code=400, detail="带提交 ID 的请求请使用 /api/chat 和回执查询接口")
         if stream_handler is None:
             raise HTTPException(status_code=501, detail="Streaming not enabled")
         effective_id = _effective_chat_id(req.chat_id, authorization)
@@ -977,9 +1363,9 @@ def create_web_app(
                 async for chunk in stream_handler(effective_id, req.message, **options):
                     yield {"data": chunk}
                 yield {"data": "[DONE]"}
-            except Exception as exc:
-                logger.error(f"Stream error: {exc}")
-                yield {"data": f"[ERROR] {exc}"}
+            except Exception:
+                logger.error("Chat stream failed; private exception details withheld")
+                yield {"data": "[ERROR] 消息处理失败，请稍后重试"}
 
         return EventSourceResponse(event_generator())
 
@@ -1078,6 +1464,7 @@ def create_web_app(
             strategy_report_max_symbols = 10
         safe = {
             "supports_images": supports_images,
+            "supports_progress": progress_handler is not None,
             "agent_backend": "powercore" if getattr(settings, "agent_backend", "native") == "powercore" else "native",
             "llm_provider": settings.llm_provider,
             "model": settings.model,
