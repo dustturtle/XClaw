@@ -30,7 +30,7 @@ Choose a provider supported by your environment, its model ID and the matching A
 2. The configured model requests tools as needed. For mainland Chinese historical prices, the source chain tries pytdx, baostock, yfinance and AkShare. A quote, a historical close and an intraday observation may have different timestamps.
 3. The agent receives tool results and returns an answer through the originating channel. SQLite stores local chat and business records. Optional skills, MCP servers and scheduled tasks extend this path.
 
-The Chinese manual covers model configuration, channels, tools, backtests, storage and scheduling. Keep the Web listener on loopback for a local trial. Configure authentication before sharing the service. A hosted model can receive prompts, conversation context and tool results; data providers receive the instruments queried. Review those boundaries before entering holdings or attaching files.
+The Chinese manual covers model configuration, channels, tools, backtests, storage and scheduling. Keep the Web listener on loopback for a local trial. Configure authentication before sharing the service. Watchlists and holdings are stored in local SQLite. When you use a hosted model, its provider can receive the current message, history and memory included in context, and tool results. Listing a watchlist can expose symbols and notes. Viewing holdings can expose share counts and costs. Market-data providers receive the instruments queried. Review those boundaries before entering holdings or attaching files.
 
 ## Build and test
 
