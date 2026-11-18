@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 import xclaw.channels.wechat_multi_tenant as wechat_multi_tenant_module
 from xclaw.channels.wechat import (
@@ -221,7 +221,8 @@ def _make_image_message(
     )
 
 
-def test_admin_and_invite_session_flow(db: Database) -> None:
+@pytest.fixture
+async def invite_client(db: Database):
     ilink_client = FakeIlinkClient()
     service = _make_service(db, ilink_client=ilink_client)
 
@@ -230,51 +231,51 @@ def test_admin_and_invite_session_flow(db: Database) -> None:
 
     app = create_web_app(message_handler=handler)
     app.state.set_wechat_multi_tenant_service(service)
-    client = TestClient(app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        try:
+            yield client, ilink_client, service
+        finally:
+            await service.stop()
 
-    tenant = client.post("/api/admin/tenants", json={"name": "Tenant A"})
+
+@pytest.mark.asyncio
+async def test_admin_and_invite_session_flow(invite_client) -> None:
+    client, _, _ = invite_client
+
+    tenant = await client.post("/api/admin/tenants", json={"name": "Tenant A"})
     tenant_id = tenant.json()["tenant_id"]
-    link = client.post(f"/api/admin/tenants/{tenant_id}/invite-links", json={})
+    link = await client.post(f"/api/admin/tenants/{tenant_id}/invite-links", json={})
     public_token = link.json()["public_token"]
 
-    session1 = client.post(f"/api/invite/{public_token}/sessions")
-    session2 = client.post(f"/api/invite/{public_token}/sessions")
+    session1 = await client.post(f"/api/invite/{public_token}/sessions")
+    session2 = await client.post(f"/api/invite/{public_token}/sessions")
 
     assert session1.status_code == 200
     assert session2.status_code == 200
     assert session1.json()["invite_session_id"] != session2.json()["invite_session_id"]
     assert link.json()["invite_url"].endswith(f"/invite/{public_token}")
 
-    asyncio.run(service.stop())
 
+@pytest.mark.asyncio
+async def test_invite_session_refresh_and_confirm_binding(db: Database, invite_client) -> None:
+    client, ilink_client, service = invite_client
 
-def test_invite_session_refresh_and_confirm_binding(db: Database) -> None:
-    ilink_client = FakeIlinkClient()
-    service = _make_service(db, ilink_client=ilink_client)
-
-    async def handler(chat_id: str, text: str) -> str:
-        return f"echo: {text}"
-
-    app = create_web_app(message_handler=handler)
-    app.state.set_wechat_multi_tenant_service(service)
-    client = TestClient(app)
-
-    tenant = client.post("/api/admin/tenants", json={"name": "Tenant A"})
+    tenant = await client.post("/api/admin/tenants", json={"name": "Tenant A"})
     tenant_id = tenant.json()["tenant_id"]
-    link = client.post(f"/api/admin/tenants/{tenant_id}/invite-links", json={})
+    link = await client.post(f"/api/admin/tenants/{tenant_id}/invite-links", json={})
     public_token = link.json()["public_token"]
 
-    session = client.post(f"/api/invite/{public_token}/sessions")
+    session = await client.post(f"/api/invite/{public_token}/sessions")
     first_session_id = session.json()["invite_session_id"]
-    refreshed = client.post(f"/api/invite/sessions/{first_session_id}/refresh")
+    refreshed = await client.post(f"/api/invite/sessions/{first_session_id}/refresh")
     second_session_id = refreshed.json()["invite_session_id"]
-    old_status = client.get(f"/api/invite/sessions/{first_session_id}")
+    old_status = await client.get(f"/api/invite/sessions/{first_session_id}")
 
     assert refreshed.status_code == 200
     assert second_session_id != first_session_id
     assert old_status.json()["state"] == "superseded"
 
-    second = asyncio.run(db.get_invite_session(second_session_id))
+    second = await db.get_invite_session(second_session_id)
     assert second is not None
     ilink_client.status_by_qr[second["qrcode"]] = QRStatusResponse(
         status="confirmed",
@@ -282,14 +283,14 @@ def test_invite_session_refresh_and_confirm_binding(db: Database) -> None:
         bot_token="token-1",
         ilink_bot_id="bot-1",
     )
-    confirmed = client.get(f"/api/invite/sessions/{second_session_id}")
-    members = client.get(f"/api/admin/tenants/{tenant_id}/members")
+    confirmed = await client.get(f"/api/invite/sessions/{second_session_id}")
+    members = await client.get(f"/api/admin/tenants/{tenant_id}/members")
 
     assert confirmed.json()["state"] == "confirmed"
     assert len(members.json()) == 1
     assert members.json()[0]["ilink_user_id"] == "user-1"
-
-    asyncio.run(service.stop())
+    [credential] = await db.list_active_credentials()
+    assert service.manager.is_running(credential["credential_id"])
 
 
 @pytest.mark.asyncio
