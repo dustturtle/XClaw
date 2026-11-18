@@ -248,9 +248,11 @@ class Element {
   get textContent() { return this._text + this.children.map(child => child.textContent).join(""); }
   replaceChildren() { this._text = ""; this.children = []; }
   appendChild(child) { this.children.push(child); }
+  setAttribute(name, value) { this[name] = value; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
 }
 function fetchMock(url, options = {}) {
+  if (String(url) === "/api/chat/models") return Promise.resolve({ok:true, json:async()=>({model_options:["codex/fixture-default","codex/fixture-b","codex/fixture-a"],default_model:"codex/fixture-default"})});
   return new Promise((resolve, reject) => {
     const request = {
       url: String(url), options, handled: false,
@@ -269,11 +271,14 @@ function createPage() {
   context = vm.createContext({
     document: {
       getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
-      createElement() { return new Element(); }
+      createElement() { return new Element(); },
+      createTextNode(text) { const element = new Element(); element.textContent = text; return element; }
     },
     localStorage: storage(local), sessionStorage: storage(session),
-    window: {addEventListener(name, callback) { events[name] = callback; }},
+    window: {location: {search: ""}, addEventListener(name, callback) { events[name] = callback; }},
     crypto: {randomUUID: require("node:crypto").randomUUID, subtle: {async digest(_type, data) { return createHash("sha256").update(data).digest(); }}},
+    ResizeObserver: class { observe() {} }, MutationObserver: class { observe() {} },
+    requestAnimationFrame: fn => setImmediate(fn), performance,
     TextEncoder, URLSearchParams, AbortController, Uint8Array, atob,
     URL: {createObjectURL(file) { return "blob:" + file.name; }, revokeObjectURL() {}},
     FileReader: class {
@@ -322,14 +327,14 @@ main().catch(error => { process.stderr.write(error.stack + "\n"); process.exitCo
 """
 
 
-def run_page_script(scenario, *, supports_progress=True, markdown=False, receipts=False):
+def run_page_script(scenario, *, supports_progress=True, markdown=False, receipts=False, openui=False, prepare=False):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for deterministic browser-script tests")
     page = _build_chat_page_html(
         auth_enabled=False, model_name="test", provider_name="test",
         supports_images=True, supports_progress=supports_progress,
-        supports_receipts=receipts,
+        supports_receipts=receipts, supports_openui=openui, supports_prepare=prepare,
     )
     script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
     if markdown:
@@ -904,3 +909,198 @@ second.reply({reply: "second final"});
 await flush();
 assert.deepEqual(replies(), ["first final", "second final"]);
 """)
+
+
+def test_failed_receipt_does_not_generate_ui_and_keeps_draft():
+    run_page_script(r"""
+await initial();
+evaluate("window.uiCalls=0; window.XClawOpenUIHost={attach(){window.uiCalls++},clear(){}};");
+const post = await send("请分析，不要重放工具");
+const payload=JSON.parse(post.options.body);
+post.reply({request_id:payload.request_id,status:"accepted"},202);
+await flush();
+const outcome={request_id:payload.request_id,status:"failed",reply:"模型暂时不可用"};
+evaluate("applyReceipt(active,"+JSON.stringify(outcome)+")");
+assert.equal(evaluate("window.uiCalls"),0);
+assert.equal(el("message-input").value,"请分析，不要重放工具");
+assert.equal(replies().at(-1),"模型暂时不可用");
+assert.equal(el("send-btn").disabled,false);
+assert.equal(evaluate("active.pending.receiptFinished"),true);
+assert.equal(requests.filter(r=>r.options.method==="POST").length,1);
+""",receipts=True,openui=True)
+
+
+def test_failed_history_skips_ui_but_normal_negative_business_reply_does_not():
+    run_page_script(r"""
+evaluate("window.uiCalls=0; window.XClawOpenUIHost={attach(){window.uiCalls++},clear(){}};");
+await initial(snap({status:"completed",stage:"completed",messages:[
+ {role:"user",content:"问题"}, {role:"assistant",content:"模型暂时不可用",status:"failed"},
+ {role:"assistant",content:"没有符合条件的股票"}]}));
+assert.equal(evaluate("window.uiCalls"),1);
+assert.deepEqual(replies(),["模型暂时不可用","没有符合条件的股票"]);
+""",openui=True)
+
+
+def test_write_recovery_panel_requires_explicit_review_and_never_replays():
+    run_page_script(r"""
+await initial();
+request("/api/chat/write-recovery").reply({records: [{id:"operation", tool_name:"portfolio_manage", arguments_json:'{"symbol":"600519"}', state:"unknown", created_at:"2026-11-17 08:00:00"}]});
+await flush();
+assert.equal(el("write-recovery").hidden, false);
+const section = el("write-recovery-records").children[0];
+const first = section.children[1].children[0], second = section.children[2].children[0];
+const note = section.children[3], button = section.children[4];
+assert.equal(button.disabled, true);
+first.checked = true; first.listeners.change();
+second.checked = true; second.listeners.change();
+assert.equal(button.disabled, true);
+note.value = "核对到已生效的一条记录，执行已停止"; note.listeners.input();
+assert.equal(button.disabled, false);
+void button.listeners.click(); await flush();
+const ack = request("/api/chat/write-recovery/acknowledge", "POST");
+assert.deepEqual(JSON.parse(ack.options.body), {chat_id:"room", execution_id:"operation", confirmed_reviewed:true, execution_stopped:true, note:note.value});
+ack.reply({status:"acknowledged",message:"已记录核对；未重试，不表示原操作成功。"}); await flush();
+request("/api/chat/write-recovery").reply({records:[]}); await flush();
+assert.equal(el("write-recovery").hidden, true);
+assert.equal(requests.filter(r => r.options.method === "POST").length, 1);
+assert.match(el("messages").textContent, /不表示原操作成功/);
+""")
+
+
+@pytest.mark.parametrize("last_failed", [True, False])
+def test_native_history_restores_exact_latest_failure_status(last_failed):
+    run_page_script(r"""
+await flush();
+const records=[{role:"assistant",content:"同一段普通否定文字",status:"failed"}];
+if (!LAST_FAILED) records.push({role:"assistant",content:"同一段普通否定文字"});
+request("/api/chat/history").reply({messages:records}); await flush();
+assert.equal(el("status-pill").textContent, LAST_FAILED ? "上次任务未完成" : "准备就绪");
+assert.equal(el("send-btn").disabled,false);
+assert.equal(requests.filter(r=>r.options.method==="POST").length,0);
+const post=await send("新问题");
+assert.equal(el("status-pill").textContent,"正在提交");
+assert.equal(evaluate("active.historyFailed"),false);
+""".replace("LAST_FAILED", "true" if last_failed else "false"), supports_progress=False, receipts=True)
+
+
+def test_idle_progress_preserves_latest_history_failure_without_blocking_send():
+    run_page_script(r"""
+await initial({...idle(), messages:[{role:"assistant",content:"失败正文",status:"failed"}]});
+assert.equal(el("status-pill").textContent,"上次任务未完成");
+assert.equal(el("send-btn").disabled,false);
+assert.match(el("status-pill").style,/9f331c/);
+""")
+
+
+@pytest.mark.parametrize("strategy", [True, False])
+def test_recovery_explains_strategy_local_write_without_generalizing_to_other_tools(strategy):
+    run_page_script(r"""
+await initial();
+request("/api/chat/write-recovery").reply({records:[{id:"untouched", tool_name:STRATEGY ? "strategy_scan" : "submit_order", arguments_json:'{"symbol":"600519","note":"<script>bad</script>"}', state:"unknown", created_at:"2026-11-17 08:00:00"}]});
+await flush();
+const info=el("write-recovery-records").children[0].children[0];
+assert.match(info.children[0].textContent,/600519.*待核对/);
+assert.doesNotMatch(info.children[0].textContent,/unknown/);
+assert.equal(info.children[3].open,undefined);
+assert.equal(info.children[3].children[1].textContent,'{"symbol":"600519","note":"<script>bad</script>"}');
+if (STRATEGY) {
+ assert.match(info.textContent,/策略扫描（本地分析记录）/);
+ assert.match(info.textContent,/不是买入、卖出或下单/);
+ assert.match(info.textContent,/是否已经保存尚未确认/);
+} else {
+ assert.match(info.textContent,/submit_order/);
+ assert.doesNotMatch(info.textContent,/不是买入|本地分析记录/);
+}
+assert.equal(requests.filter(r=>r.options.method==="POST").length,0);
+""".replace("STRATEGY", "true" if strategy else "false"))
+
+
+
+def test_native_prepare_selector_visible_and_defaults_standard():
+    from bs4 import BeautifulSoup
+    page = BeautifulSoup(_build_chat_page_html(auth_enabled=False,model_name='test',provider_name='test',
+        supports_progress=False,supports_prepare=True), 'html.parser')
+    selector = page.select_one('#execution-mode')
+    assert not selector.find_parent(class_='field').has_attr('hidden')
+    assert selector.select_one('option[selected]')['value'] == 'standard'
+    assert selector.select_one('option[value="prepare"]') is not None
+    assert page.select_one('#run-controls').has_attr('hidden')
+    run_page_script(r"""
+await flush();assert.equal(el("execution-mode").value,"standard");
+el("execution-mode").value="prepare";
+const post=await send("仅准备操作");
+assert.equal(JSON.parse(post.options.body).execution_mode,"prepare");
+post.reply({reply:"准备完成"});await flush();
+""",supports_progress=False,prepare=True)
+
+
+def test_model_selection_is_frozen_per_request_and_scoped_to_chat():
+    run_page_script(r'''
+await initial(idle());
+assert.equal(el("model-select").value,"codex/fixture-default");
+el("model-select").value="codex/fixture-a";el("model-select").listeners.change();
+const post=await send("read only");
+assert.equal(JSON.parse(post.options.body).model,"codex/fixture-a");
+assert.equal(el("model-select").disabled,true);
+el("model-select").value="codex/fixture-b";
+assert.equal(JSON.parse(post.options.body).model,"codex/fixture-a");
+el("chat-id").value="other";el("chat-id").listeners.change();await flush();
+assert.equal(el("model-select").value,"codex/fixture-default");
+await progress(idle());
+post.reply({reply:"stale"});await flush();
+assert.equal(el("model-select").value,"codex/fixture-default");
+''')
+
+
+def test_model_rejection_is_explicit_without_leaking_backend_details():
+    run_page_script(r'''
+await flush();
+el("model-select").value="codex/fixture-a";el("model-select").listeners.change();
+const post=await send("read only");
+post.reply({detail:{code:"model_unavailable",message:"private-api-key"}},400);await flush();
+assert.match(el("messages").textContent,/所选模型不可用，未自动切换模型/);
+assert.ok(!el("messages").textContent.includes("private-api-key"));
+assert.equal(el("model-select").value,"codex/fixture-a");
+''',supports_progress=False)
+
+
+def test_legacy_receipt_retry_preserves_original_fingerprint_without_model():
+    run_page_script(r'''
+await initial(idle());
+const original={chat_id:"room",message:"legacy question",attachments:[],execution_mode:"analysis"};
+const fingerprint=createHash("sha256").update(JSON.stringify(original)).digest("hex");
+const oldId="a".repeat(32);
+evaluate("active.pending="+JSON.stringify({requestId:oldId,fingerprint,mode:"analysis",draftText:"legacy question",files:[],settled:true})+"; controls(active)");
+assert.equal(el("model-select").disabled,true);
+// Tampering with the draft still cannot reuse or replace the original request ID.
+el("message-input").value="changed question";
+void el("send-btn").listeners.click();await flush();
+assert.equal(requests.filter(r=>r.url==="/api/chat").length,0);
+assert.equal(evaluate("active.pending.requestId"),oldId);
+assert.match(el("progressMessageEl")?.textContent || el("run-message").textContent,/保持原文字/);
+const retry=await send("legacy question");
+const body=JSON.parse(retry.options.body);
+assert.equal(body.request_id,oldId);
+assert.equal("model" in body,false);
+delete body.request_id;assert.deepEqual(body,original);
+''',receipts=True)
+
+
+def test_model_badges_distinguish_requested_from_verified_response_and_history():
+    run_page_script(r'''
+await initial(idle());
+evaluate('appendMessage("assistant","rejected",[],false,false,{model:"codex/fixture-a"})');
+assert.equal(el("messages").children.at(-1)["data-model"],undefined);
+evaluate('appendMessage("assistant","local command",[],false,true,{model:"codex/fixture-a"})');
+assert.equal(el("messages").children.at(-1)["data-model"],undefined);
+evaluate('appendMessage("assistant","verified",[],false,true,{model:"requested",response_model:"codex/fixture-b"})');
+assert.equal(el("messages").children.at(-1)["data-model"],"codex/fixture-b");
+evaluate('appendMessage("assistant","old history",[],true,true,{})');
+assert.equal(el("messages").children.at(-1)["data-model"],undefined);
+evaluate('appendMessage("assistant","verified history",[],true,true,{model:"codex/fixture-a"})');
+assert.equal(el("messages").children.at(-1)["data-model"],"codex/fixture-a");
+// Inline final badge likewise requires the verified response_model parameter.
+evaluate('active.liveBubble=document.createElement("article");active.inlinePresentation={};active.liveRequestId="one";');
+evaluate('finishInline(active,"answer","completed","codex/fixture-b")');
+assert.equal(evaluate('active.liveBubble["data-model"]'),"codex/fixture-b");
+''')

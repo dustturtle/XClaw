@@ -118,3 +118,9 @@ textarea:focus-visible { outline: none; }
   #run-time { font-size: 10px; }
   .input-tools { gap: 4px; }
 }
+
+.model-select { max-width: 250px; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 7px 9px; font-size: 12px; }
+.model-select:disabled { color: var(--muted); cursor: not-allowed; }
+@media (max-width: 640px) { .model-select { max-width: 160px; } .toolbar-title { gap: 8px; flex-wrap: wrap; } }
+
+.message.assistant[data-model]::before { content: "XCLAW · " attr(data-model); }

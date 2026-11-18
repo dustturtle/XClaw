@@ -1,0 +1,26 @@
+.xcui{font:inherit;color:inherit;margin-block:16px}.xcui-col{display:grid;gap:12px}.xcui-card{border:1px solid #ccd6e2;border-radius:14px;padding:16px;background:#f8fafc;overflow:auto}.xcui h4{margin:0 0 12px}.xcui dl{margin:0}.xcui dl>div{display:grid;grid-template-columns:minmax(80px,1fr) minmax(0,3fr);gap:12px;padding:5px 0;border-bottom:1px solid #e8edf2}.xcui dt{color:#58677b;overflow-wrap:anywhere}.xcui dd{margin:0;overflow-wrap:anywhere}.xcui button,.xcui select{font:inherit;border:1px solid #acbdd1;border-radius:8px;padding:8px 12px;background:white;margin:4px}.xcui button{cursor:pointer}.xcui button:disabled{opacity:.55;cursor:wait}.xcui [role=alert]{color:#a32929}.xcui ol{padding-left:20px}.xcui p{white-space:pre-wrap}
+.xcui-price{font-size:1.6em;font-weight:700}.xcui-up{color:#b33131}.xcui-down{color:#13774b}.xcui pre{white-space:pre;overflow:auto;font-size:.85em}.xcui svg{width:100%;height:auto}
+
+.xcui-chart-summary{margin:0 0 8px;font-size:.9em;color:#344457}.xcui-axis-label{font-size:11px;fill:#58677b}.xcui-grid{stroke:#dce3ea;stroke-width:1}.xcui-chart-point{fill:#2166ab;fill-opacity:.25;stroke:transparent;stroke-width:3}.xcui-chart-point:hover,.xcui-chart-point:focus{fill-opacity:1;stroke:#8ab6dc;outline:none}.xcui-chart-note,.xcui-provenance{font-size:.8em;color:#58677b;overflow-wrap:anywhere}.xcui-raw-data{margin-top:12px;border-top:1px solid #dce3ea;padding-top:10px}.xcui-raw-data summary{cursor:pointer;color:#315778}.xcui-raw-data pre{max-height:320px;overflow:auto;padding:8px;background:#eef2f6;border-radius:6px}
+
+.xcui-chart-readout{min-height:1.5em;margin:0;font-size:.85em;color:#315778}.xcui-history svg{display:block}.xcui-axis-label{font-size:13px}
+
+.xcui-table-scroll{overflow:auto;margin:12px 0}.xcui-table-scroll table{border-collapse:collapse;min-width:540px;width:100%;font-size:.85em}.xcui-table-scroll th,.xcui-table-scroll td{padding:9px;border-bottom:1px solid #dce3ea;text-align:right;vertical-align:top}.xcui-table-scroll th:first-child{text-align:left;min-width:125px}.xcui-table-scroll thead{background:#eef2f6}.xcui-table-scroll small{display:block;font-weight:400;color:#58677b}
+/* Cards belong in the answer's reading flow, not a separate diagnostic panel. */
+.xcui{margin-block:16px 20px}.xcui-card{background:rgba(255,255,255,.55);border-color:#e3e0d8;border-radius:10px;padding:16px 18px}.xcui h4{font-size:1em;line-height:1.5;margin-bottom:10px}.xcui-chart-summary{font-size:.82em;color:#6b706e}.xcui-provenance{font-size:.76em;color:#727770;line-height:1.6;margin-top:10px}.xcui-chart-note{font-size:.78em;line-height:1.6;margin:8px 0}.xcui-raw-data{border-color:#e3e0d8}.xcui-raw-data summary{font-size:.8em;color:#676f69}.xcui button.xcui-refresh{display:block;margin:8px 0 0 auto;padding:4px 8px;font-size:.78em;color:#59665f;border-color:transparent;background:transparent}.xcui button.xcui-refresh:hover{background:#ecefe9;border-color:#dce2d9}.xcui-operation{font-size:.85em;color:#52695b;margin:6px 0}.xcui-table-scroll thead{background:#eeeee7}
+.xcui-history svg{max-height:260px}
+/* Keep axes at native readable size; only the chart region scrolls on phones. */
+.xcui,.xcui-col,.xcui-col>div,.xcui-card,.xcui-history{min-width:0;max-width:100%;box-sizing:border-box}
+.xcui-chart-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;touch-action:pan-x pan-y;border-radius:6px}
+.xcui-history .xcui-chart-scroll svg{width:720px;min-width:720px;height:230px;max-height:none;display:block}
+.xcui-chart-scroll .xcui-axis-label{font-size:13px}
+.xcui-chart-picker{display:block;font-size:13px;line-height:1.5;margin:8px 0}
+.xcui-chart-picker input{display:block;width:100%;min-height:44px;margin:0;box-sizing:border-box;accent-color:#2166ab}
+.xcui-chart-scroll:focus-visible{outline:2px solid #2166ab;outline-offset:2px}
+.xcui-table-scroll{min-width:0;max-width:100%}
+@media(max-width:480px){.xcui-card{padding:12px}.xcui-chart-summary,.xcui-chart-readout{font-size:13px}.xcui-chart-note,.xcui-provenance{font-size:12px}}
+
+/* Identifier/date headers and values share an edge; financial values remain right-aligned. */
+.xcui-table-scroll .xcui-research-table th:first-child,.xcui-table-scroll .xcui-research-table td:first-child{text-align:left;white-space:nowrap}
+.xcui-research-table th,.xcui-research-table td{font-variant-numeric:tabular-nums}
+.xcui-strategy h5{font-size:14px;margin:16px 0 4px}.xcui-strategy table{font-size:13px;min-width:800px}.xcui-strategy th,.xcui-strategy td{text-align:left;white-space:normal;min-width:100px;max-width:320px}.xcui-strategy td:nth-child(3),.xcui-strategy td:nth-child(4){min-width:180px}

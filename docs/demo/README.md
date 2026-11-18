@@ -11,3 +11,5 @@ python docs/demo/render.py --chrome /path/to/chromium --output docs/demo/chat.pn
 ~~~
 
 Chrome uses a temporary browser profile and renders a 1120 × 760 viewport. Fonts can differ between operating systems. The prices 100.00, 103.00 and 101.97 are synthetic. The daily percentage changes are +3% and −1%.
+
+For the evidence-backed chart fixture, see the [OpenUI demo](../openui.md).

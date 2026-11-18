@@ -8,6 +8,8 @@ XClaw is a self-hosted Python agent for chat, task automation and market researc
 
 The screenshot uses a fixed question and answer. The real chat renderer formats the table; the fixture contacts neither a model nor a market-data provider.
 
+Web chat can also interleave prose and a chart backed by a tool result. [See the synthetic five-day chart, configuration and build guide](docs/openui.md).
+
 ## Run locally
 
 Use Python 3.12 or newer. The Dockerfile on this branch uses Python 3.11, below the package requirement.

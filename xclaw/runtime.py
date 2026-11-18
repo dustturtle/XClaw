@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +18,52 @@ from xclaw.attachments import ImageAttachment
 from xclaw.config import Settings
 from xclaw.db import Database
 from xclaw.llm import create_provider
+from xclaw.model_routing import bind_request_model, resolve_request_model
 from xclaw.memory import FileMemory, StructuredMemory
 from xclaw.oauth import AuthProfileStore, OpenAICodexOAuthManager
 from xclaw.skills import build_skill_registry
 from xclaw.tools import ToolRegistry
 from xclaw.tools.sub_agent import SubAgentTool
 from xclaw.lifecycle import LifecycleJournal, exception_fields
+
+@dataclass
+class _TurnEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+    owner: asyncio.Task | None = None
+
+
+class ChatTurnGate:
+    """Serialize native turns within this runtime, keyed by resolved chat identity.
+
+    No DB transaction is held while waiting or calling a provider. This prevents
+    in-process session lost updates, not cross-process writes or crash replay.
+    Sub-agents run directly with persistence disabled and do not enter this gate.
+    """
+    def __init__(self):
+        self._entries: dict[int, _TurnEntry] = {}
+
+    @asynccontextmanager
+    async def hold(self, chat_id: int):
+        entry = self._entries.setdefault(chat_id, _TurnEntry())
+        task = asyncio.current_task()
+        if entry.owner is task:
+            raise RuntimeError("Recursive persistent turn for the same chat is not supported")
+        entry.users += 1  # Include waiters so cancellation cannot replace an active lock.
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            entry.owner = task
+            yield
+        finally:
+            if acquired:
+                entry.owner = None
+                entry.lock.release()
+            entry.users -= 1
+            if entry.users == 0:
+                self._entries.pop(chat_id, None)
+
 
 def _setup_logging(settings: Settings) -> None:
     settings.logs_path.mkdir(parents=True, exist_ok=True)
@@ -140,14 +183,15 @@ async def _run(settings: Settings) -> None:
         await powercore.check_ready()
         logger.info("Agent backend: PowerCore Service API v1")
 
-    async def context_for_chat(chat_id: int) -> AgentContext:
+    async def context_for_chat(chat_id: int, model: str | None = None) -> AgentContext:
         chat = await db.get_chat(chat_id)
         if chat is None:
             raise ValueError("Chat does not exist")
+        turn_llm, turn_settings = bind_request_model(llm, settings, model)
         return AgentContext(
-            chat_id=chat_id, channel=chat["channel"], db=db, llm=llm, tools=tools,
+            chat_id=chat_id, channel=chat["channel"], db=db, llm=turn_llm, tools=tools,
             file_memory=file_memory, structured_memory=struct_memory,
-            settings=settings, scheduler=scheduler, powercore=powercore,
+            settings=turn_settings, scheduler=scheduler, powercore=powercore,
         )
 
     async def tool_context_for_chat(chat_id: int):
@@ -155,11 +199,14 @@ async def _run(settings: Settings) -> None:
 
         ctx = await context_for_chat(chat_id)
         return ToolContext(
-            chat_id=ctx.chat_id, channel=ctx.channel, db=db, llm=llm,
+            chat_id=ctx.chat_id, channel=ctx.channel, db=db, llm=ctx.llm,
             file_memory=file_memory, structured_memory=struct_memory,
-            settings=settings, scheduler=scheduler, powercore=powercore,
+            settings=ctx.settings, scheduler=scheduler, powercore=powercore,
             workspace_root=settings.groups_path / str(chat_id),
         )
+
+    native_progress: dict[str, dict] = {}
+    native_turns = ChatTurnGate()
 
     # ── Build message handler ─────────────────────────────────────────────────
     async def handle_message(
@@ -168,15 +215,77 @@ async def _run(settings: Settings) -> None:
         channel: str = "web",
         chat_type: str = "private",
         *, attachments: list[ImageAttachment] | None = None, execution_mode: str | None = None,
+        model: str | None = None,
     ) -> str:
+        # Bind the requested ID before the first await or chat/session mutation.
+        model = resolve_request_model(settings, model)
         chat_id = await resolve_message_chat(db, external_chat_id, channel, chat_type)
-        ctx = await context_for_chat(chat_id)
+        # The whole load/compact/tool/persist turn, including /reset, is serialized.
+        # PowerCore owns its own execution protocol; do not add a network-duration lock.
+        if powercore is not None:
+            return await handle_resolved_message(chat_id, text, channel, attachments, execution_mode, model)
+        async with native_turns.hold(chat_id):
+            return await handle_resolved_message(chat_id, text, channel, attachments, execution_mode, model)
+
+    async def handle_resolved_message(chat_id, text, channel, attachments, execution_mode, model):
+        ctx = await context_for_chat(chat_id, model)
         if execution_mode is not None:
-            if execution_mode not in {"standard", "analysis"}:
+            if execution_mode not in {"standard", "analysis", "prepare"}:
                 raise ValueError("Unsupported execution mode")
+            if execution_mode == "prepare" and (channel != "web" or powercore is not None
+                    or not settings.openui_enabled or not settings.openui_inline_stream):
+                raise ValueError("Prepare mode requires native inline Web UI")
             ctx.execution_mode = execution_mode
         ctx.skip_session_persistence = channel == "scheduler"
-        return await agent_loop(ctx, text, attachments=attachments)
+        from xclaw.receipts import current_receipt
+        receipt_id = current_receipt.get()
+        if channel == "web" and powercore is None and receipt_id:
+            native_progress[receipt_id] = {"started": time.monotonic(), "message": "正在准备执行…"}
+            async def report(message):
+                native_progress[receipt_id]["message"] = message
+            ctx.progress_callback = report
+        try:
+            from xclaw.text_stream import current_text_sink
+            sink = current_text_sink.get()
+            options = {"on_text_event": sink} if sink is not None else {}
+            reply = await agent_loop(ctx, text, attachments=attachments, **options)
+            from xclaw.responses import RejectedReply
+            if channel == "web" and settings.openui_enabled and not isinstance(reply, RejectedReply):
+                try:
+                    from xclaw.ui_evidence import save_evidence
+                    if getattr(ctx, "inline_presentation", None) is not None:
+                        from xclaw.ui_presentations_v2 import save_v2
+                        from xclaw.responses import PresentationReply
+                        import uuid
+                        payload = await save_v2(
+                            db, ctx.chat_id, ctx.assistant_message_id,
+                            receipt_id or uuid.uuid4().hex, reply, text,
+                            ctx.inline_evidence, ctx.inline_presentation, ctx.inline_actions)
+                        response_model = getattr(reply, "response_model", None)
+                        reply = PresentationReply(reply, presentation_id=payload['presentation_id'],
+                                                  message_id=payload['message_id'])
+                        reply.response_model = response_model
+                        if sink is not None:
+                            import json
+                            presentation=json.loads(payload['source'])
+                            await sink({"type": "ui_commit", "round": ctx.inline_round, "text": str(reply),
+                                        "reply_hash": payload['reply_hash'],
+                                        "presentation_id": payload['presentation_id'],
+                                        "message_id": payload['message_id'], "presentation": {
+                                            **presentation, "version": "xclaw-live-1",
+                                            "message_id":payload['message_id'],
+                                            "round": ctx.inline_round, "evidence": ctx.inline_evidence,
+                                            "provisional": False, "validated": True}})
+                    else:
+                        await save_evidence(db, ctx.chat_id, reply, text, ctx.tool_evidence, model=ctx.settings.model)
+                except Exception:
+                    if sink is not None and getattr(ctx, "inline_presentation", None) is not None:
+                        await sink({"type": "draft_failed", "round": ctx.inline_round})
+                    logger.warning("UI evidence could not be saved; original reply preserved")
+            return reply
+        finally:
+            if receipt_id:
+                native_progress.pop(receipt_id, None)
 
     async def handle_message_stream(
         external_chat_id: str,
@@ -184,9 +293,14 @@ async def _run(settings: Settings) -> None:
         channel: str = "web",
         chat_type: str = "private",
         *, attachments: list[ImageAttachment] | None = None, execution_mode: str | None = None,
+        model: str | None = None,
     ):
-        reply = await handle_message(external_chat_id, text, channel, chat_type, attachments=attachments, execution_mode=execution_mode)
+        reply = await handle_message(external_chat_id, text, channel, chat_type, attachments=attachments, execution_mode=execution_mode, model=model)
         if not reply:
+            return
+        from xclaw.responses import RejectedReply
+        if isinstance(reply, RejectedReply):
+            yield reply
             return
         chunk_size = 120
         start = 0
@@ -380,7 +494,22 @@ async def _run(settings: Settings) -> None:
             chat_id = await resolve_message_chat(db, external_chat_id, "web", "private")
             return await powercore.cancel_run(chat_id, run_id)
 
+        from xclaw.openui import OpenUITools
+
+        async def openui_context(external_chat_id: str):
+            chat_id = await resolve_message_chat(db, external_chat_id, "web", "private")
+            return await tool_context_for_chat(chat_id)
+
+        async def native_receipt_progress(receipt_id: str):
+            state = native_progress.get(receipt_id)
+            if not state:
+                return None
+            return {"message": state["message"],
+                    "elapsed_seconds": max(0, time.monotonic() - state["started"])}
+
         web_app = create_web_app(
+            receipt_progress_handler=native_receipt_progress if powercore is None else None,
+            openui_service=OpenUITools(tools, openui_context) if settings.openui_enabled else None,
             message_handler=lambda cid, text, **options: handle_message(cid, text, "web", **options),
             stream_handler=lambda cid, text, **options: handle_message_stream(cid, text, "web", **options),
             supports_images=powercore is not None,

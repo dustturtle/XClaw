@@ -25,18 +25,32 @@ ANSWER = """### 三日收盘对比
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chrome", required=True, help="Path to Chrome or Chromium")
-    parser.add_argument("--output", type=Path, default=Path("docs/demo/chat.png"))
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--openui", action="store_true", help="Render the synthetic history card fixture")
     args = parser.parse_args()
-    page = web._build_chat_page_html(auth_enabled=False, model_name="演示样本", provider_name="fixture")
+    page = web._build_chat_page_html(auth_enabled=False, model_name="演示样本", provider_name="fixture",
+                                    supports_openui=args.openui)
+    page = page.replace("<head>", """<head><script>
+    window.fetch = async url => {
+      if (url === "/api/chat/models") return new Response(JSON.stringify({
+        model_options: ["演示样本"], default_model: "演示样本"
+      }));
+      throw new Error("Offline fixture: no network requests");
+    };
+    </script>""")
     static = Path(web.__file__).with_name("static")
     page = re.sub(r'"/chat-assets/([^"?]+)(?:\?[^"]*)?"',
                   lambda match: json.dumps((static / match[1]).as_uri()), page)
     fixture = json.dumps([QUESTION, ANSWER], ensure_ascii=False)
-    page = page.replace("</body>", f"""<script>
+    script = f"""
     const [question, answer] = {fixture};
     appendMessage("user", question);
     appendMessage("assistant", answer);
-    </script></body>""")
+    """
+    if args.openui:
+        script = Path(__file__).with_name("openui-fixture.js").read_text()
+    page = page.replace("</body>", f"<script>{script}</script></body>")
+    output = args.output or Path("docs/demo/openui.png" if args.openui else "docs/demo/chat.png")
     with tempfile.TemporaryDirectory() as directory:
         scratch = Path(directory)
         html = scratch / "chat.html"
@@ -44,8 +58,8 @@ def main():
         subprocess.run([args.chrome, "--headless", "--disable-background-networking",
                         "--disable-extensions", "--hide-scrollbars",
                         "--user-data-dir=" + str(scratch / "profile"),
-                        "--window-size=1120,760", "--virtual-time-budget=1000",
-                        "--screenshot=" + str(args.output.resolve()), html.as_uri()], check=True)
+                        "--window-size=1120,1200" if args.openui else "--window-size=1120,760", "--virtual-time-budget=1000",
+                        "--screenshot=" + str(output.resolve()), html.as_uri()], check=True)
 
 
 if __name__ == "__main__":

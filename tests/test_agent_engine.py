@@ -300,30 +300,11 @@ def test_normalize_final_text_fallback():
     assert _normalize_final_text("有内容") == "有内容"
 
 
-def test_micro_compact_replaces_old_tool_results():
-    messages = [
-        Message(
-            role="user",
-            content=[
-                ToolResultBlock(tool_use_id="t1", content="A" * 120),
-                ToolResultBlock(tool_use_id="t2", content="B" * 120),
-            ],
-        ),
-        Message(
-            role="user",
-            content=[
-                ToolResultBlock(tool_use_id="t3", content="C" * 120),
-                ToolResultBlock(tool_use_id="t4", content="D" * 120),
-            ],
-        ),
-    ]
+def test_micro_compact_preserves_unknown_orphan_tool_results():
+    messages = [Message(role="user", content=[ToolResultBlock(tool_use_id="unknown", content="A" * 120)])]
+    _micro_compact(messages, keep_recent_tool_results=0)
+    assert messages[0].content[0].content == "A" * 120
 
-    _micro_compact(messages, keep_recent_tool_results=2)
-
-    assert messages[0].content[0].content == "[已处理的工具结果，原内容已压缩]"
-    assert messages[0].content[1].content == "[已处理的工具结果，原内容已压缩]"
-    assert messages[1].content[0].content == "C" * 120
-    assert messages[1].content[1].content == "D" * 120
 
 
 @pytest.mark.asyncio
@@ -474,3 +455,29 @@ async def test_sub_agent_does_not_load_or_save_parent_session(db: Database):
     recent_messages = await db.get_recent_messages(chat_id, limit=10)
     assert len(recent_messages) == 1
     assert recent_messages[0]["content"] == "父级消息"
+
+@pytest.mark.asyncio
+async def test_model_failure_is_structured_and_persisted_then_next_turn_can_continue(db: Database):
+    from xclaw.responses import RejectedReply
+    chat_id=await db.get_or_create_chat('web','failure-status-test')
+    llm=MockLLMProvider([])
+    llm.chat=AsyncMock(side_effect=RuntimeError('test upstream failure'))
+    ctx=AgentContext(chat_id=chat_id,channel='web',db=db,llm=llm,tools=ToolRegistry())
+    reply=await agent_loop(ctx,'只读问题')
+    assert isinstance(reply,RejectedReply)
+    saved=await db.load_session(chat_id)
+    assert saved[-1]['role']=='assistant' and saved[-1]['content']==str(reply)
+    ctx.llm=MockLLMProvider([LLMResponse(stop_reason=StopReason.end_turn,content=[TextBlock(text='恢复成功')])])
+    assert await agent_loop(ctx,'继续只读')=='恢复成功'
+
+
+def test_web_chart_requests_require_current_read_only_evidence():
+    ctx = MagicMock()
+    ctx.channel = "web"
+    ctx.settings.openui_enabled = True
+    prompt = _build_system_prompt(ctx)
+    assert "不能只引用旧答复文字" in prompt
+    assert "禁止为了图表重跑strategy_scan" in prompt
+    assert "用户禁止重查" in prompt
+    ctx.settings.openui_enabled = False
+    assert "不能只引用旧答复文字" not in _build_system_prompt(ctx)

@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from concurrent.futures import Future
+from contextvars import ContextVar
 from copy import deepcopy
 import threading
 import time
 from typing import Awaitable, Callable
 
 import pandas as pd
+
+
+# Request-scoped opt-in: skip completed local snapshots, not in-flight work or
+# provider admission. Context propagates into asyncio producer tasks.
+refresh_history_results: ContextVar[bool] = ContextVar('refresh_history_results', default=False)
 
 
 def _consume_exception(future: asyncio.Future) -> None:
@@ -45,11 +51,12 @@ class HistoryRequestCache:
         return result
 
     async def get(self, key: tuple, producer: Callable[[], Awaitable[pd.DataFrame]]) -> pd.DataFrame:
+        bypass = refresh_history_results.get()
         with self._lock:
             now = self._clock()
             for stale in [k for k, (_, at) in self._cache.items() if now - at >= self._ttl]:
                 del self._cache[stale]
-            if key in self._cache:
+            if not bypass and key in self._cache:
                 self._cache.move_to_end(key)
                 return self._copy(self._cache[key], cache_hit=True)
             shared = self._inflight.get(key)
@@ -70,7 +77,10 @@ class HistoryRequestCache:
         snapshot = await asyncio.shield(wrapped)
         # pandas copies of a shared frame are serialized even across OS threads.
         with self._lock:
-            return self._copy(snapshot, cache_hit=False)
+            result = self._copy(snapshot, cache_hit=False)
+            result.attrs['refresh_requested'] = bypass
+            result.attrs['inflight_shared'] = not leader
+            return result
 
     def _complete(self, key, shared, task):
         try:

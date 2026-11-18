@@ -213,3 +213,10 @@ xclaw.data/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Built from frontend/package-lock.json for tests and Python packages.
+frontend/node_modules/
+xclaw/channels/static/openui.js
+xclaw/channels/static/openui.css
+xclaw/channels/static/openui-prompt.txt
+xclaw/channels/static/openui-licenses.txt

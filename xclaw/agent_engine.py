@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -10,12 +11,15 @@ from typing import Any
 
 from loguru import logger
 
+from xclaw import stage_timing
 from xclaw.attachments import ImageAttachment
 
 from xclaw.db import Database
 from xclaw.llm import LLMProvider
 from xclaw.llm_types import (
     LLMResponse,
+    TextDeltaEvent,
+    DoneEvent,
     Message,
     StopReason,
     TextBlock,
@@ -71,6 +75,61 @@ class AgentContext:
         self.skip_message_persistence = skip_message_persistence
         self.powercore = powercore
         self.execution_mode = execution_mode
+        self.tool_evidence: list[dict] = []
+        self.progress_callback = None
+
+
+async def _report_progress(ctx: AgentContext, message: str) -> None:
+    if ctx.progress_callback is not None:
+        await ctx.progress_callback(message)
+
+
+async def _execute_tool_batch(ctx: AgentContext, tool_uses, tool_context, round_index=0):
+    """Parallelize only explicitly independent reads; writes are ordering barriers."""
+    semaphore = asyncio.Semaphore(4)
+    completed = 0
+
+    async def execute(call):
+        nonlocal completed
+        async with semaphore:
+            await _report_progress(ctx, f"正在查询业务数据（{completed}/{len(tool_uses)} 已完成）")
+            from xclaw.tool_execution_journal import execute_with_journal, is_read_only_call
+            from xclaw.tools.sub_agent import SubAgentTool
+            target = ctx.tools.get(call.name)
+            safe_read = (is_read_only_call(ctx.tools, call)
+                         or type(target) is SubAgentTool and ctx.powercore is None
+                         or call.name == "investment_report" and call.input.get("action") in {"latest","history"})
+            with stage_timing.span("tool", round_index, getattr(target, "name", "unknown")) as timing_status:
+                if ctx.execution_mode == "prepare" and not safe_read:
+                    from xclaw.tools import ToolResult, ToolExecutionEffect
+                    result = ToolResult("预览确认模式：该写操作未执行；请输出待确认计划，不要再次直接执行。", True,
+                                        execution_effect=ToolExecutionEffect.NOT_APPLIED)
+                    result.prepare_blocked = True
+                elif (ctx.execution_mode == "prepare" and call.name == "investment_report"
+                      and call.input.get("action") in {"latest", "history"}):
+                    result = await ctx.tools.execute(call.name, call.input, tool_context)
+                else:
+                    result = await execute_with_journal(ctx, call, tool_context)
+                if timing_status is not None and result.is_error:
+                    timing_status[0] = "blocked" if getattr(result, "prepare_blocked", False) else "tool_error"
+            completed += 1
+            await _report_progress(ctx, f"业务数据已返回（{completed}/{len(tool_uses)}）")
+            return result
+
+    results = []
+    batch = []
+    for call in tool_uses:
+        tool = ctx.tools.get(call.name)
+        if tool and tool.read_only and tool.independent:
+            batch.append(call)
+            continue
+        if batch:
+            results.extend(await asyncio.gather(*(execute(item) for item in batch)))
+            batch = []
+        results.append(await execute(call))
+    if batch:
+        results.extend(await asyncio.gather(*(execute(item) for item in batch)))
+    return results
 
 
 def _build_system_prompt(
@@ -108,6 +167,22 @@ def _build_system_prompt(
             "简单的单工具查询+分析绝不要走 sub_agent。"
         ),
     ]
+    if ctx.channel == "web" and getattr(ctx.settings, "openui_enabled", False):
+        parts.append(
+            "## Web 交互展示边界\n"
+            "此 Web 界面启用了独立的 OpenUI 展示阶段，会在本轮文字答复后按需生成真实业务卡片与按钮。"
+            "你负责事实、业务推理和已授权工具调用，不要伪造按钮链接/Markdown按钮，也不要断言界面不支持按钮。"
+            "用户要求先展示待确认操作时，只查询并说明待确认的业务目标与参数，不提前执行写入；"
+            "交互展示由后续阶段处理，不能保证每次生成成功。"
+            "用户本轮明确要求图表、数据卡片或对比展示时，若未禁止重新查询，应实际调用所需的只读工具取得本轮可绑定结果；不能只引用旧答复文字就承诺本轮卡片。"
+            "禁止为了图表重跑strategy_scan等有持久化副作用的工具；已有策略结果可用只读strategy_runs。用户禁止重查或没有合适的只读工具时，沿用旧信息必须注明原时点，只提供文字说明并如实说明本轮图表缺少可绑定证据，不伪造结果。"
+            "对已有真实时间序列或财报数据的图表请求，保留结论、关键数值、来源和限制，不额外输出ASCII/Unicode字符画或Mermaid图表代码来代替组件；"
+            "将相关解读分段，供真实组件插入对应段落。用户明确索要代码或纯文本示意时除外。"
+            "当前历史/分时组件展示收盘价格折线，不是OHLC蜡烛图，也没有成交量副图；不得承诺会显示蜡烛K线或成交量图。"
+            "历史组件可在已加载区间内筛选最近3/5/20个交易日，默认全部；这只是本地筛选，不承诺任意日期的新查询控件。"
+            "财报组件展示原始币种和金额单位的多期表格，不是亿元柱状图；文字可换算亿元但应明确文字换算与原始表单位。"
+            "展示阶段尚未完成时，只描述已获取数据与期望展示，不保证某按钮、图形或切换控件一定出现。"
+        )
     if file_memory_content.strip():
         parts.append("\n## 记忆文件\n" + file_memory_content)
     if memories:
@@ -118,17 +193,131 @@ def _build_system_prompt(
     return "\n\n".join(parts)
 
 
+_MAX_PRESERVED_EXECUTION_CHARS = 200_000
+_HISTORY_EXECUTION_MARKER = "[历史执行记录：仅上下文，禁止重放；缺失或冲突不代表成功]"
+
+
+def _tool_occurrences(messages):
+    calls, results = {}, {}
+    for index, message in enumerate(messages):
+        if not isinstance(message.content, list):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolUseBlock):
+                calls.setdefault(block.id, []).append((index, message.role, block))
+            elif isinstance(block, ToolResultBlock):
+                results.setdefault(block.tool_use_id, []).append((index, message.role, block))
+    return calls, results
+
+
+def _repair_orphan_tool_results(messages: list[Message]) -> list[Message]:
+    """Demote ambiguous legacy tool groups to verbatim, non-executable evidence.
+
+    Duplicate IDs, missing calls/results, inverted order and invalid roles do not
+    establish execution success. Never manufacture calls/results or replay tools.
+    """
+    calls, results = _tool_occurrences(messages)
+    valid = set()
+    for index, message in enumerate(messages):
+        if message.role != "assistant" or not isinstance(message.content, list):
+            continue
+        batch = [block.id for block in message.content if isinstance(block, ToolUseBlock)]
+        if not batch or any(not identity or len(calls.get(identity, [])) != 1
+                            or len(results.get(identity, [])) != 1 for identity in batch):
+            continue
+        pending = set(batch)
+        cursor = index + 1
+        while pending and cursor < len(messages):
+            result_message = messages[cursor]
+            if (result_message.role != "user" or not isinstance(result_message.content, list)
+                    or not result_message.content
+                    or any(not isinstance(block, ToolResultBlock) for block in result_message.content)):
+                break
+            identities = [block.tool_use_id for block in result_message.content]
+            if len(set(identities)) != len(identities) or not set(identities) <= pending:
+                break
+            pending.difference_update(identities)
+            cursor += 1
+        if not pending:
+            valid.update(batch)
+    repaired = []
+    for message in messages:
+        if isinstance(message.content, str):
+            repaired.append(message)
+            continue
+        blocks = []
+        for block in message.content:
+            identity = block.id if isinstance(block, ToolUseBlock) else block.tool_use_id if isinstance(block, ToolResultBlock) else None
+            if isinstance(block, (ToolUseBlock, ToolResultBlock)) and identity not in valid:
+                blocks.append(TextBlock(text=_HISTORY_EXECUTION_MARKER + "\n" + json.dumps(block.model_dump(), ensure_ascii=False)))
+            else:
+                blocks.append(block)
+        repaired.append(Message(role=message.role, content=blocks))
+    return repaired
+
+
+def _is_read_only_tool(name, registry):
+    tool = registry.get(name) if registry is not None else None
+    return tool is not None and tool.read_only is True
+
+
+def _preserved_execution_records(messages, registry):
+    """Keep state-changing/unknown execution evidence out of lossy summaries."""
+    calls, _ = _tool_occurrences(messages)
+    protected = {identity for identity, uses in calls.items()
+                 if any(not _is_read_only_tool(block.name, registry) for _, _, block in uses)}
+    records = []
+    for message in messages:
+        if isinstance(message.content, str):
+            if message.content.startswith(_HISTORY_EXECUTION_MARKER):
+                records.append(message.content)
+            continue
+        for block in message.content:
+            if isinstance(block, TextBlock) and block.text.startswith(_HISTORY_EXECUTION_MARKER):
+                records.append(block.text)
+            elif (isinstance(block, ToolUseBlock) and block.id in protected
+                  or isinstance(block, ToolResultBlock) and block.tool_use_id in protected):
+                records.append(_HISTORY_EXECUTION_MARKER + "\n" + json.dumps(block.model_dump(), ensure_ascii=False))
+    return records
+
+
+def _safe_compaction_cut(messages: list[Message], keep_recent: int) -> int:
+    """Move a proposed cut backwards until it no longer splits any tool pair."""
+    cut = max(0, len(messages) - max(1, keep_recent))
+    calls = {}
+    pairs = []
+    for index, message in enumerate(messages):
+        if not isinstance(message.content, list):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolUseBlock):
+                calls[block.id] = index
+            elif isinstance(block, ToolResultBlock) and block.tool_use_id in calls:
+                pairs.append((calls.pop(block.tool_use_id), index))
+    while True:
+        earlier = [start for start, end in pairs if start < cut <= end]
+        if not earlier:
+            return cut
+        cut = min(earlier)
+
+
 async def _compact_messages(
     messages: list[Any],
     ctx: AgentContext,
     keep_recent: int,
 ) -> list[Any]:
     """Summarise older messages to reduce context size."""
+    messages = _repair_orphan_tool_results(messages)
     if len(messages) <= keep_recent:
         return messages
 
-    to_summarise = messages[: len(messages) - keep_recent]
-    recent = messages[len(messages) - keep_recent :]
+    if sum(map(len, _preserved_execution_records(messages, getattr(ctx, "tools", None)))) > _MAX_PRESERVED_EXECUTION_CHARS:
+        raise ValueError("历史执行记录超过安全上限，请新建会话；不会删除记录或重放操作")
+    cut = _safe_compaction_cut(messages, keep_recent)
+    if cut == 0:
+        return messages
+    to_summarise = messages[:cut]
+    recent = messages[cut:]
 
     # Build a simple text digest of old messages
     digest_parts: list[str] = []
@@ -154,7 +343,9 @@ async def _compact_messages(
         summary = "（历史对话已压缩）"
 
     summary_msg = Message(role="user", content=f"[历史摘要] {summary}")
-    return [summary_msg] + recent
+    records = _preserved_execution_records(to_summarise, getattr(ctx, "tools", None))
+    preserved = [Message(role="user", content=record) for record in records]
+    return [summary_msg] + preserved + recent
 
 
 def _messages_to_serializable(messages: list[Message]) -> list[dict]:
@@ -213,22 +404,121 @@ def _normalize_final_text(text: str) -> str:
 def _micro_compact(
     messages: list[Message],
     keep_recent_tool_results: int = _MICRO_COMPACT_KEEP_RECENT_TOOL_RESULTS,
+    registry: ToolRegistry | None = None,
 ) -> None:
-    """Shrink older tool results so the model focuses on recent evidence."""
-    tool_results: list[ToolResultBlock] = []
-    for message in messages:
-        if not isinstance(message.content, list):
-            continue
-        for block in message.content:
-            if isinstance(block, ToolResultBlock):
-                tool_results.append(block)
+    """Shrink only confirmed read-only, uniquely paired evidence.
 
-    if len(tool_results) <= keep_recent_tool_results:
-        return
-
-    for block in tool_results[:-keep_recent_tool_results]:
+    Unknown/state-changing tools and damaged history retain exact execution
+    evidence. Preserved records can grow; never trade execution safety for size.
+    """
+    if keep_recent_tool_results < 0:
+        raise ValueError("keep_recent_tool_results must be nonnegative")
+    calls, results = _tool_occurrences(messages)
+    eligible = set()
+    for identity, uses in calls.items():
+        outputs = results.get(identity, [])
+        if (len(uses) == len(outputs) == 1 and uses[0][1] == "assistant"
+                and outputs[0][1] == "user" and uses[0][0] < outputs[0][0]
+                and _is_read_only_tool(uses[0][2].name, registry)):
+            eligible.add(identity)
+    ordered = [block for message in messages if isinstance(message.content, list)
+               for block in message.content if isinstance(block, ToolResultBlock)
+               and block.tool_use_id in eligible]
+    old = ordered[:-keep_recent_tool_results] if keep_recent_tool_results else ordered
+    for block in old:
         if len(block.content) > 100:
             block.content = _MICRO_COMPACT_PLACEHOLDER
+
+
+def _finalize_evidence_limits(final_text, messages, evidence):
+    """Append source limitations, not model inference; synchronize stored final text."""
+    from xclaw.responses import RejectedReply
+    if isinstance(final_text, RejectedReply):
+        return final_text
+    unverified = False
+    for item in evidence:
+        if item.get("name") != "cn_fund_nav" or item.get("is_error"):
+            continue
+        try:
+            payload = json.loads(item.get("content", ""))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("identity_verified") is False:
+            unverified = True
+    if not unverified:
+        return final_text
+    note = "数据限制：本轮基金净值来源未回显基金代码，基金身份未独立核验；这些净值不能视为已核实对应所查询基金。"
+    final_text = str(final_text) + "\n\n" + note
+    # The last assistant is the final answer, not an earlier tool-use turn.
+    if messages and messages[-1].role == "assistant" and not (
+        isinstance(messages[-1].content, list)
+        and any(isinstance(b, ToolUseBlock) for b in messages[-1].content)
+    ):
+        messages[-1] = Message(role="assistant", content=final_text)
+    else:
+        messages.append(Message(role="assistant", content=final_text))
+    return final_text
+
+
+async def _stream_agent_response(llm, on_text_event, round_index, inline=None, **kwargs):
+    """Only draft text escapes before a fully validated terminal response.
+
+    Tool deltas are never executable; caller gets a response only after EOF.
+    """
+    await on_text_event({"type": "reset", "round": round_index})
+    final = None
+    parts = []
+    inline_error = None
+    saw_delta = saw_text = False
+    async for event in llm.chat_stream(**kwargs):
+        if final is not None:
+            raise ValueError("Event after model completion")
+        if not saw_delta and not isinstance(event, DoneEvent):
+            stage_timing.first_delta("first_delta")
+            saw_delta = True
+        if isinstance(event, TextDeltaEvent):
+            if event.text and not saw_text:
+                stage_timing.first_delta("first_text_delta")
+                saw_text = True
+            parts.append(event.text)
+            if inline is None:
+                await on_text_event({"type": "delta", "round": round_index, "text": event.text})
+            elif inline_error is None:
+                try:
+                    previous_revision = inline.revision
+                    inline.feed(event.text)
+                    if inline.revision != previous_revision:
+                        await on_text_event({"type": "ui_snapshot", "round": round_index,
+                                             "text": inline.text, "presentation": inline.snapshot()})
+                except (ValueError, TypeError, KeyError) as exc:
+                    inline_error = exc
+                    # A chunk can contain valid records before a bad record.
+                    # Preserve only that parsed text prefix, never its cards.
+                    await on_text_event({"type": "draft_failed", "round": round_index,
+                                         "text": inline.text})
+        elif isinstance(event, DoneEvent):
+            final = event.response
+    if final is None:
+        raise ValueError("Model stream missing completion")
+    if parts and "".join(parts) != final.text():
+        raise ValueError("Model draft differs from completion")
+    if final.stop_reason not in {StopReason.end_turn, StopReason.tool_use}:
+        raise ValueError("Incomplete model response")
+    if final.tool_uses():
+        if final.stop_reason != StopReason.tool_use:
+            raise ValueError("Invalid tool completion")
+        ids = [call.id for call in final.tool_uses()]
+        if len(set(ids)) != len(ids) or any(not call.id.strip() or not call.name.strip() for call in final.tool_uses()):
+            raise ValueError("Invalid tool identity")
+        await on_text_event({"type": "reset", "round": round_index})
+    elif inline is not None:
+        if inline_error is not None:
+            raise inline_error
+        inline.finish()
+        await on_text_event({"type": "ui_snapshot", "round": round_index,
+                             "text": inline.text, "presentation": inline.snapshot()})
+        final = final.model_copy(update={"content": [TextBlock(text=inline.text)]})
+    return final
 
 
 async def agent_loop(
@@ -236,6 +526,7 @@ async def agent_loop(
     user_message: str,
     max_iterations: int | None = None,
     attachments: list[ImageAttachment] | None = None,
+    on_text_event=None,
 ) -> str:
     """Core Agent loop.
 
@@ -255,6 +546,10 @@ async def agent_loop(
 
     # ── 1. Quick memory path ────────────────────────────────────────────────
     stripped_message = user_message.strip()
+    if ctx.execution_mode == "prepare" and (ctx.powercore is not None
+            or _RESET_PATTERN.match(stripped_message) or _MEMORY_PATTERN.match(stripped_message)):
+        from xclaw.responses import RejectedReply
+        return RejectedReply("预览确认模式未执行重置、记忆写入或委派操作；当前仅支持自选股和本地模拟持仓确认计划。")
     if attachments:
         if ctx.powercore is None:
             raise ValueError("当前执行后端未启用图片输入")
@@ -284,6 +579,10 @@ async def agent_loop(
     if not ctx.skip_session_persistence:
         raw_session = await ctx.db.load_session(ctx.chat_id)
     messages: list[Message] = _messages_from_serializable(raw_session) if raw_session else []
+    messages = _repair_orphan_tool_results(messages)
+    if sum(map(len, _preserved_execution_records(messages, ctx.tools))) > _MAX_PRESERVED_EXECUTION_CHARS:
+        from xclaw.responses import RejectedReply
+        return RejectedReply("历史执行记录超过安全上限，请新建会话继续。原会话记录已保留，不会删除或重放操作。")
 
     # ── 3. Build system prompt ───────────────────────────────────────────────
     file_mem_content = ""
@@ -319,22 +618,57 @@ async def agent_loop(
     )
 
     final_text = ""
+    verified_model = None
+    current_turn_evidence = []
     consecutive_error_rounds = 0
     force_direct_answer = False
     empty_reply_retried = False
     for iteration in range(_max_iter):
-        _micro_compact(messages)
+        _micro_compact(messages, registry=ctx.tools)
+        inline = None
         try:
-            response: LLMResponse = await ctx.llm.chat(
-                messages=messages,
-                tools=(tool_defs if tool_defs and not force_direct_answer else None),
-                system=system_prompt,
-                max_tokens=settings.max_tokens if settings else 4096,
-            )
+            await _report_progress(ctx, "正在分析问题…" if iteration == 0 else "正在结合查询结果生成答复…")
+            if (on_text_event is not None and ctx.channel == "web"
+                    and getattr(settings, "openui_enabled", False)
+                    and getattr(settings, "openui_inline_stream", False)):
+                from xclaw.inline_ui_stream import InlineUIProtocol, current_evidence
+                allow_actions = ctx.execution_mode == "prepare"
+                if allow_actions:
+                    from xclaw.tool_execution_journal import inspect_journal
+                    journal = await inspect_journal(ctx.db, ctx.chat_id)
+                    allow_actions = not any(row['state'] in {'started','unknown'} for row in journal)
+                inline = InlineUIProtocol(await current_evidence(ctx), iteration, allow_actions=allow_actions)
+            call_model = ctx.llm.chat
+            if on_text_event is not None:
+                async def call_model(**kwargs):
+                    return await _stream_agent_response(ctx.llm, on_text_event, iteration, inline=inline, **kwargs)
+            with stage_timing.span("model", iteration):
+                response: LLMResponse = await call_model(
+                    messages=messages,
+                    tools=(tool_defs if tool_defs and not force_direct_answer else None),
+                    system=system_prompt + (inline.prompt() if inline is not None else ""),
+                    max_tokens=settings.max_tokens if settings else 4096,
+                )
+        except asyncio.CancelledError:
+            if on_text_event is not None and inline is not None:
+                await on_text_event({"type": "draft_failed", "round": iteration})
+            raise
         except Exception as exc:
+            if on_text_event is not None:
+                from xclaw.llm_responses import ResponsesProtocolError
+                if isinstance(exc, ResponsesProtocolError) and exc.code == "response_model_mismatch":
+                    # A terminal identity contradiction revokes even draft prose,
+                    # not only cards. Do not leave wrong-model text in the UI.
+                    await on_text_event({"type": "reset", "round": iteration})
+                await on_text_event({"type": "draft_failed" if inline is not None else "reset", "round": iteration})
             logger.error(f"LLM call failed: {exc}")
-            final_text = f"AI 调用失败，请稍后重试。"
+            from xclaw.responses import RejectedReply
+            final_text = RejectedReply(f"所选模型 {settings.model} 调用失败，未切换到其他模型，请稍后重试。" if settings and getattr(settings, "web_model_options", []) else "AI 调用失败，请稍后重试。")
+            messages.append(Message(role="assistant", content=str(final_text)))
             break
+
+        if ctx.channel == "web" and getattr(ctx.llm, "require_model_identity", False) is True:
+            verified_model = ctx.llm.model
 
         # Record usage
         if ctx.db and response.usage:
@@ -367,6 +701,11 @@ async def agent_loop(
             break
 
         if response.stop_reason == StopReason.end_turn:
+            if inline is not None:
+                ctx.inline_presentation = inline.finish()
+                ctx.inline_evidence = inline.evidence
+                ctx.inline_round = iteration
+                ctx.inline_actions = inline.actions
             final_text = _normalize_final_text(response.text())
             messages.append(Message(role="assistant", content=response.content))
             break
@@ -383,16 +722,16 @@ async def agent_loop(
 
             # Execute each tool and collect results
             tool_result_blocks = []
-            for tool_use in tool_uses:
-                logger.debug(f"Executing tool: {tool_use.name} params={tool_use.input}")
-                result = await ctx.tools.execute(tool_use.name, tool_use.input, tool_context)
-                tool_result_blocks.append(
-                    ToolResultBlock(
-                        tool_use_id=tool_use.id,
-                        content=result.content,
-                        is_error=result.is_error,
-                    )
-                )
+            results = await _execute_tool_batch(ctx, tool_uses, tool_context, iteration)
+            for tool_use, result in zip(tool_uses, results):
+                current_turn_evidence.append({"name": tool_use.name, "content": result.content, "is_error": result.is_error})
+                if (ctx.channel == "web" and getattr(settings, "openui_enabled", False)
+                        and not getattr(result, "prepare_blocked", False)):
+                    ctx.tool_evidence.append({"name": tool_use.name, "arguments": tool_use.input,
+                                              "content": result.content, "is_error": result.is_error})
+                tool_result_blocks.append(ToolResultBlock(
+                    tool_use_id=tool_use.id, content=result.content, is_error=result.is_error,
+                ))
 
             # Append user message with tool results
             messages.append(
@@ -415,9 +754,36 @@ async def agent_loop(
     else:
         final_text = "已达到最大工具调用轮数，请缩短任务或分步执行。"
 
+    final_text = _finalize_evidence_limits(final_text, messages, current_turn_evidence)
+    if getattr(ctx, "inline_presentation", None) is not None:
+        inline_text = "\n\n".join(b['source'] for b in ctx.inline_presentation['blocks'] if b['type']=='text')
+        if inline_text != final_text:
+            if str(final_text).startswith(inline_text + "\n\n"):
+                ctx.inline_presentation['blocks'].append({"id":"server-notice", "type":"text",
+                    "source":str(final_text)[len(inline_text)+2:], "server_notice":True})
+            else:
+                ctx.inline_presentation = None
+                if on_text_event is not None:
+                    await on_text_event({"type":"draft_failed", "round":ctx.inline_round})
+    await _report_progress(ctx, "正在保存本轮答复…")
+
     # ── 8. Persist session and assistant message ─────────────────────────────
     if not ctx.skip_message_persistence:
-        await ctx.db.save_message(ctx.chat_id, "assistant", final_text)
+        from xclaw.responses import RejectedReply
+        stamp = ({"response_model": verified_model} if verified_model and not isinstance(final_text, RejectedReply) else {})
+        if stamp:
+            from xclaw.responses import VerifiedModelReply
+            final_text = VerifiedModelReply(final_text, verified_model)
+        message_id = await ctx.db.save_message(ctx.chat_id, "assistant", final_text, **stamp)
+        ctx.assistant_message_id = message_id
+        from xclaw.responses import RejectedReply
+        if isinstance(final_text, RejectedReply):
+            final_text.message_id = message_id
+            final_text.chat_id = ctx.chat_id
+            if ctx.channel == "web":
+                await ctx.db.conn.execute("CREATE TABLE IF NOT EXISTS web_message_outcomes (message_id INTEGER PRIMARY KEY, status TEXT NOT NULL)")
+                await ctx.db.conn.execute("INSERT OR REPLACE INTO web_message_outcomes VALUES(?,'failed')", (message_id,))
+                await ctx.db.conn.commit()
     if not ctx.skip_session_persistence:
         await ctx.db.save_session(ctx.chat_id, _messages_to_serializable(messages))
 

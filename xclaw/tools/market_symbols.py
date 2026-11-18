@@ -25,3 +25,19 @@ def normalize_hk_yf_symbol(symbol: str) -> str:
         return f"{code}.HK"
 
     return candidate if has_suffix else f"{candidate}.HK"
+
+
+_HK_INDEX_NAMES = {"恒生指数": "HSI", "恒生科技指数": "HSTECH", "国企指数": "HSCEI",
+                   "恒生中国企业指数": "HSCEI"}
+HK_HISTORY_INDICES = frozenset(_HK_INDEX_NAMES.values())
+
+
+def hk_history_index(symbol: str, market: str) -> str | None:
+    """Resolve exact HK index aliases. Only explicit caret aliases cross US routing."""
+    alias = symbol.strip().upper()
+    if market == "US" and alias.startswith("^") and alias[1:] in HK_HISTORY_INDICES:
+        return alias[1:]
+    if market != "HK":
+        return None
+    alias = alias.removesuffix(".HK").removeprefix("^")
+    return alias if alias in HK_HISTORY_INDICES else _HK_INDEX_NAMES.get(alias)

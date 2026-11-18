@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -287,7 +288,8 @@ class Database:
                 "observe_retry_at": "REAL",
                 "observe_attempts": "INTEGER NOT NULL DEFAULT 0",
             },
-            "messages": {"execution_key": "TEXT"},
+            "messages": {"execution_key": "TEXT", "response_model": "TEXT", "response_hash": "TEXT"},
+            "web_receipts": {"requested_model": "TEXT"},
         }.items():
             async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
                 columns = {row["name"] for row in await cur.fetchall()}
@@ -376,10 +378,12 @@ class Database:
         role: str,
         content: str,
         sender_name: str | None = None,
+        *, response_model: str | None = None,
     ) -> int:
         async with self.conn.execute(
-            "INSERT INTO messages (chat_id, role, content, sender_name) VALUES (?,?,?,?)",
-            (chat_id, role, content, sender_name),
+            "INSERT INTO messages (chat_id, role, content, sender_name,response_model,response_hash) VALUES (?,?,?,?,?,?)",
+            (chat_id, role, content, sender_name, response_model,
+             hashlib.sha256(content.encode()).hexdigest() if response_model else None),
         ) as cur:
             await self.conn.commit()
             return cur.lastrowid  # type: ignore[return-value]

@@ -6,8 +6,10 @@ import hashlib
 import json
 import uuid
 
+from xclaw import stage_timing
 from xclaw.lifecycle import LifecycleJournal, exception_fields
-from xclaw.responses import RejectedReply
+from xclaw.responses import RejectedReply, PresentationReply
+from xclaw.text_stream import TextStreams, current_text_sink
 
 
 current_receipt: ContextVar[str | None] = ContextVar("web_receipt", default=None)
@@ -24,6 +26,7 @@ class ReceiptStore:
         self.boot_id = uuid.uuid4().hex
         self.journal = LifecycleJournal(db._path.parent / "logs", "chat-receipts")
         self.active: set[str] = set()
+        self.text_streams = TextStreams()
 
     @staticmethod
     def scope(chat_id: str, token: str) -> str:
@@ -36,20 +39,23 @@ class ReceiptStore:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def admit(self, scope, request_id, payload):
+    async def admit(self, scope, request_id, payload, *, allow_legacy=False):
         fingerprint = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         ).hexdigest()
         identity = uuid.uuid4().hex
         async with self.db.conn.execute(
-            "INSERT OR IGNORE INTO web_receipts(id,scope,request_id,fingerprint,boot_id) VALUES(?,?,?,?,?)",
-            (identity, scope, request_id, fingerprint, self.boot_id),
+            "INSERT OR IGNORE INTO web_receipts(id,scope,request_id,fingerprint,boot_id,requested_model) VALUES(?,?,?,?,?,?)",
+            (identity, scope, request_id, fingerprint, self.boot_id, payload.get("model")),
         ) as cur:
             created = cur.rowcount == 1
         await self.db.conn.commit()
         receipt = await self.lookup(scope, request_id)
         if receipt["fingerprint"] != fingerprint:
-            raise ReceiptConflict()
+            legacy = {k:v for k,v in payload.items() if k != "model"}
+            legacy_hash = hashlib.sha256(json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+            if not (allow_legacy and receipt["requested_model"] is None and receipt["fingerprint"] == legacy_hash):
+                raise ReceiptConflict()
         if created:
             self.active.add(identity)
             self.journal.emit("request_accepted", receipt_id=identity)
@@ -67,6 +73,10 @@ class ReceiptStore:
     async def execute(self, receipt, handler):
         identity = receipt["id"]
         token = current_receipt.set(identity)
+        sink_token = current_text_sink.set(lambda event: self.text_streams.publish(identity, event))
+        timing = stage_timing.StageTiming(identity)
+        timing_token = stage_timing.active.set(timing)
+        outcome = "failed"
         try:
             self.journal.emit("request_execution_started", receipt_id=identity)
             reply = await handler()
@@ -78,11 +88,17 @@ class ReceiptStore:
                 await self.finish(identity, {
                     "status": "failed" if isinstance(reply, RejectedReply) else "completed",
                     "reply": reply, "delivery": "direct",
+                    **({"response_model":reply.response_model} if getattr(reply,"response_model",None) else {}),
+                    **({"presentation_id":reply.presentation_id,"message_id":reply.message_id}
+                       if isinstance(reply,PresentationReply) else {}),
                 })
             else:
-                await self.project(fresh)
+                projection = await self.project(fresh)
+            outcome = (projection["status"] if fresh["submission_id"] else
+                       "failed" if isinstance(reply, RejectedReply) else "completed")
             self.journal.emit("request_handler_returned", receipt_id=identity)
         except asyncio.CancelledError:
+            outcome = "cancelled"
             self.journal.emit("request_interrupted", receipt_id=identity)
             raise
         except Exception as exc:
@@ -94,11 +110,20 @@ class ReceiptStore:
                     "message": "请求处理中断，可能已有部分操作生效；请核对后处理，不会自动重跑。",
                 })
         finally:
+            timing.closed = True
+            stage_timing.active.reset(timing_token)
+            self.journal.emit("request_stage_timing", receipt_id=identity,
+                              elapsed_ms=timing.elapsed(), outcome=outcome,
+                              stages=timing.events, dropped=timing.dropped)
+            await self.text_streams.publish(identity, {"type":"terminal"})
+            current_text_sink.reset(sink_token)
             current_receipt.reset(token)
             self.active.discard(identity)
 
     async def project(self, receipt, progress_handler=None):
         base = {"request_id": receipt["request_id"]}
+        if receipt.get("requested_model"):
+            base["model"] = receipt["requested_model"]
         if receipt["result_json"]:
             return {**base, **json.loads(receipt["result_json"])}
         if receipt["submission_id"]:

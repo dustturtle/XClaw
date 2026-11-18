@@ -51,7 +51,7 @@ class ChatBodyLimitMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in {"/api/chat", "/api/chat/stream"}:
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in {"/api/chat", "/api/chat/stream", "/api/openui/query", "/api/openui/mutation", "/api/openui/generate"}:
             await self.app(scope, receive, send)
             return
         body = bytearray()
@@ -60,7 +60,7 @@ class ChatBodyLimitMiddleware:
             if message["type"] == "http.disconnect":
                 return
             chunk = message.get("body", b"")
-            if len(body) + len(chunk) > MAX_CHAT_BODY_BYTES:
+            if len(body) + len(chunk) > (65536 if scope.get("path", "").startswith("/api/openui/") else MAX_CHAT_BODY_BYTES):
                 await JSONResponse({"detail": "聊天请求过大"}, status_code=413)(scope, receive, send)
                 return
             body.extend(chunk)
