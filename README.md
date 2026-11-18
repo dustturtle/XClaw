@@ -4,9 +4,21 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
+[![uv-ci](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml/badge.svg?branch=main)](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml)
 
 ---
+
+[English guide](README.en.md) · [快速开始](#快速开始) · [贡献与问题反馈](CONTRIBUTING.md)
+
+![XClaw 聊天页面用表格比较三天的合成收盘价](docs/demo/chat.png)
+
+上图展示 Web 客户端如何排版 Markdown 表格和中文结论。问题、回复和价格均为固定样本，无需模型密钥或行情账户即可复现。[演示脚本与步骤](docs/demo/README.md)
+
+## 一条查询如何得到答案
+
+Web 或消息渠道收到问题后，Agent 选择配置的模型，按需调用工具。行情工具向数据源查询，结果返回模型形成回复；SQLite 保存会话及本地业务记录。例如 A 股历史行情依次尝试 pytdx、baostock、yfinance 和 AkShare。各市场和工具的来源、延迟与可用性不同，阅读结果时请核对日期、单位和来源。
+
+使用远程模型时，提示词、相关历史和工具结果可能发送至配置的供应商。行情服务可以收到查询代码。首次体验可使用合成问题、保持 Web 监听在本机，并在开放访问前配置鉴权。
 
 ## 目录
 
@@ -44,8 +56,8 @@
 | 🔄 **协议兼容** | 支持 MCP Server 模式（暴露工具给外部 Agent）、OpenAI function calling 格式双向转换 |
 | 👥 **多用户隔离** | `multi_user_mode` 按 Bearer Token 哈希隔离用户 session |
 | ⏰ **定时任务** | APScheduler 调度，支持 cron 表达式和一次性任务 |
-| 💾 **本地存储** | SQLite（aiosqlite），自选股/持仓数据永远不离本机 |
-| 🐳 **Docker 部署** | 一键 `docker-compose up`，非 root 运行，内置健康检查 |
+| 💾 **本地存储** | SQLite（aiosqlite）保存自选股和持仓；涉及这些记录的模型请求受所选供应商的数据处理方式约束 |
+| 🐳 **Docker 部署** | 提供非 root 容器配置和健康检查；当前基础镜像版本限制见 Docker 部署 |
 | 🔒 **安全设计** | 路径守卫、Bash 默认关闭、速率限制、Auth Token、SQL 参数化 |
 
 ---
@@ -1188,7 +1200,9 @@ Agent：已创建一次性任务（明日 10:00）
 
 ## Docker 部署
 
-### 方式一：docker-compose（推荐）
+当前 Dockerfile 使用 Python 3.11-slim，低于项目要求的 Python 3.12。以下是容器配置参考；本版本请优先使用上文的 Python 3.12 安装方式。
+
+### 方式一：docker-compose
 
 ```bash
 # 1. 准备配置文件
@@ -1370,7 +1384,7 @@ class MyTool(Tool):
 
 | 层次 | 选型 | 说明 |
 |------|------|------|
-| 语言 | Python 3.11+ | 使用 `asyncio` 全异步架构 |
+| 语言 | Python 3.12+ | 使用 `asyncio` 全异步架构 |
 | LLM 客户端 | httpx + pydantic v2 | 支持 Anthropic / OpenAI / DeepSeek / Ollama |
 | Web 框架 | FastAPI + uvicorn | REST API + SSE 流式推送 |
 | 速率限制 | slowapi | 基于 IP 的请求频率控制 |
