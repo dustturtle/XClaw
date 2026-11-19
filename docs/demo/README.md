@@ -12,6 +12,27 @@ python docs/demo/render.py --chrome /path/to/chromium --output docs/demo/chat.pn
 
 Chrome uses a temporary browser profile and renders a 1120 × 760 viewport. Fonts can differ between operating systems. The prices 100.00, 103.00 and 101.97 are synthetic. The daily percentage changes are +3% and −1%.
 
-For the evidence-backed chart fixture, see the [OpenUI demo](../openui.md).
+## Replay the homepage stories
 
-[Share first-use feedback / 反馈首次体验](https://github.com/dustturtle/XClaw/issues/new?title=First-use+feedback+%2F+%E9%A6%96%E6%AC%A1%E4%BD%93%E9%AA%8C%E5%8F%8D%E9%A6%88&body=What+did+you+try%3F+%E6%83%B3%E5%AE%8C%E6%88%90%E4%BB%80%E4%B9%88%EF%BC%9F%0A%0AWhat+worked+or+where+did+you+get+stuck%3F+%E5%93%AA%E4%B8%80%E6%AD%A5%E9%A1%BA%E5%88%A9%EF%BC%8C%E6%88%96%E5%8D%A1%E5%9C%A8%E5%93%AA%E9%87%8C%EF%BC%9F%0A%0APlease+use+a+made-up+example.+Omit+credentials%2C+personal+details%2C+holdings%2C+real+chats+and+logs.+%E8%AF%B7%E4%BD%BF%E7%94%A8%E8%99%9A%E6%9E%84%E7%A4%BA%E4%BE%8B%EF%BC%8C%E5%8B%BF%E8%B4%B4%E5%87%AD%E6%8D%AE%E3%80%81%E4%B8%AA%E4%BA%BA%E4%BF%A1%E6%81%AF%E3%80%81%E6%8C%81%E4%BB%93%E3%80%81%E7%9C%9F%E5%AE%9E%E5%AF%B9%E8%AF%9D%E6%88%96%E6%97%A5%E5%BF%97%E3%80%82)
+Install the checkout using the steps above. Set CHROME to the path of your Chromium executable. Each command creates a fresh browser profile and SQLite database. The prompts select fixed tool calls and the Web client renders their returned text. This exercises storage, retrieval and presentation without model inference or a running server.
+
+~~~sh
+python docs/demo/render.py --chrome "$CHROME" --story watchlist --output docs/demo/watchlist.png
+python docs/demo/render.py --chrome "$CHROME" --story portfolio --output docs/demo/portfolio.png
+~~~
+
+## Replay the moving-average comparison
+
+Install the project and Pillow in your virtual environment. From the checkout run:
+
+~~~sh
+python docs/demo/backtest.py --chrome "$CHROME"
+~~~
+
+The script injects deterministic weekday closes (including pre-period warmup) at the historical data boundary, runs the actual 10/30 SMA backtest, prints its report and captures three stages in a temporary Chrome profile. The follow-up shows the ledger from the same tool result. The dates follow weekdays rather than an exchange holiday calendar. No live quotes, language model, messaging account or server is involved.
+
+**如何读交易记录。** 策略在预热期已开始交易。2 月 28 日以 105.96 买入的模拟持仓延续至 3 月 3 日，因此区间内第一条记录是 4 月 2 日以 103.15 卖出。引擎用当天收盘价计算均线信号，并假设以同一收盘价全仓成交，未计手续费和滑点。策略收益比较 3 月 3 日与 5 月 30 日收盘时的账户净值；买入持有基准比较这两天的合成收盘价。回撤也只在这个区间内计算。
+
+**Reading the ledger.** The strategy trades during warmup. Its February 28 purchase at 105.96 was still open on March 3, so the first entry in the reporting window is the April 2 sale at 103.15. The engine computes each signal at the close and assumes a full-position fill at that same close, with zero fees and slippage. Strategy return compares closing account equity on March 3 and May 30. Buy-and-hold compares the synthetic closing prices on those same dates. Drawdown is measured within that window.
+
+[Replay the inline OpenUI chart](../openui.md)

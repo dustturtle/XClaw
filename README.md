@@ -1,20 +1,38 @@
 # XClaw
 
-> 基于 MicroClaw 思路的 Python 多功能 **AI Agent 运行时**，聚焦**任务处理**与**A股/美股/港股投资助手**，面向中国用户打造。
+一套择时规则值得用吗？在 XClaw 的自托管聊天界面里，把策略和一直持有放在同一区间比较，再翻看买卖记录。
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![uv-ci](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml/badge.svg?branch=main)](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml)
+[English](README.en.md) · [首次运行](#快速开始) · [低带宽静图](docs/demo/backtest.png)
 
----
+## 回答还没写完，图表已经出现
 
-[English guide](README.en.md) · [快速开始](#快速开始) · [贡献与问题反馈](CONTRIBUTING.md) · [反馈首次体验](https://github.com/dustturtle/XClaw/issues/new?title=First-use+feedback+%2F+%E9%A6%96%E6%AC%A1%E4%BD%93%E9%AA%8C%E5%8F%8D%E9%A6%88&body=What+did+you+try%3F+%E6%83%B3%E5%AE%8C%E6%88%90%E4%BB%80%E4%B9%88%EF%BC%9F%0A%0AWhat+worked+or+where+did+you+get+stuck%3F+%E5%93%AA%E4%B8%80%E6%AD%A5%E9%A1%BA%E5%88%A9%EF%BC%8C%E6%88%96%E5%8D%A1%E5%9C%A8%E5%93%AA%E9%87%8C%EF%BC%9F%0A%0APlease+use+a+made-up+example.+Omit+credentials%2C+personal+details%2C+holdings%2C+real+chats+and+logs.+%E8%AF%B7%E4%BD%BF%E7%94%A8%E8%99%9A%E6%9E%84%E7%A4%BA%E4%BE%8B%EF%BC%8C%E5%8B%BF%E8%B4%B4%E5%87%AD%E6%8D%AE%E3%80%81%E4%B8%AA%E4%BA%BA%E4%BF%A1%E6%81%AF%E3%80%81%E6%8C%81%E4%BB%93%E3%80%81%E7%9C%9F%E5%AE%9E%E5%AF%B9%E8%AF%9D%E6%88%96%E6%97%A5%E5%BF%97%E3%80%82)
+先读五日走势，再看同一条回答如何在图表下继续解释最高收盘点。下图用合成价格在实际 Web 界面回放两个阶段，停留时间由演示设定。
 
-![XClaw 聊天页面用表格比较三天的合成收盘价](docs/demo/chat.png)
+![OpenUI · DEMO](docs/demo/openui.gif)
 
-上图展示 Web 客户端如何排版 Markdown 表格和中文结论。问题、回复和价格均为固定样本，无需模型密钥或行情账户即可复现。[演示脚本与步骤](docs/demo/README.md)
+[OpenUI demo](docs/openui.md)
 
-可选的 OpenUI 同流展示能在正文之间插入与本轮工具结果对应的只读行情卡。见[五日合成指数演示与配置](docs/openui.md)。
+![合成回测回放：提出问题、比较收益与回撤、查看交易记录](docs/demo/backtest.gif)
+
+**3 月到 5 月，按 10/30 日均线换仓，比一直持有好吗？** 在 2025-03-03 至 2025-05-30 的 65 个合成工作日样本中，均线策略亏损 8.69%，持有亏损 1.14%，策略最大回撤 12.34%。追看交易记录，可以看到 4 月 28 日以 112.69 买入，5 月 28 日以 108.15 卖出。
+
+13.5 秒确定性回放使用主线回测工具和 Web 界面。价格由公式生成，问题和镜头时长固定；结果仅用于演示研究过程，不构成投资建议。[复现案例](docs/demo/README.md)
+
+**第一次运行** · 安装 Python 3.12+，在仓库根目录运行 `python -m pip install -e .`，然后执行 `xclaw setup` 和 `xclaw start --config xclaw.config.yaml`。
+
+### 到周五，还记得为什么关注它吗？
+
+把虚构标的 DEMO 加入自选，写下「周五复核成交量」。再查自选，代码和当初的备注一起返回。
+
+![聊天窗口中先添加 DEMO，再从自选列表读回备注](docs/demo/watchlist.png)
+
+### 20 股，每股 12 元，这笔模拟记录占了多少本金？
+
+记录一次模拟买入，再查看持仓。工具从记录读回 20 股、均价 12 元，算出总成本 240 元。
+
+![聊天窗口显示模拟买入回执和 240 元成本](docs/demo/portfolio.png)
+
+两段对话使用固定提问，直接运行主线工具并将原始结果放进真实 Web 聊天界面。每段使用全新的内存数据库，无需模型密钥。
 
 ## 一条查询如何得到答案
 
@@ -1297,7 +1315,7 @@ server {
 | **Web 绑定本地** | 默认 `127.0.0.1`，通过反向代理暴露，避免直接暴露给公网 |
 | **Auth Token** | Web API 支持 Bearer Token 鉴权，生产环境强烈建议设置 |
 | **速率限制** | 每 IP 每分钟 `rate_limit_per_minute`（默认20）次，防止滥用 |
-| **投资数据本地** | 自选股/持仓仅存本地 SQLite，不上传任何云端，不支持自动交易 |
+| **自选股与持仓** | 记录保存在本地 SQLite。使用远程模型时，当前消息、选入上下文的历史和记忆，以及工具返回的内容都可能发送给模型供应商。例如，查看自选股可返回代码和备注，查看持仓可返回股数和成本。持仓工具不支持自动交易。 |
 | **SQL 参数化** | 所有数据库操作使用参数化查询，防止 SQL 注入 |
 | **多用户隔离** | `multi_user_mode` 模式下用户 session 互相隔离 |
 | **Docker 非 root** | 容器内以 `xclaw`（UID 1000）用户运行 |

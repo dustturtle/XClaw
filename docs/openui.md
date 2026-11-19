@@ -17,8 +17,8 @@ From a source checkout, install the Python project and run the following with No
 ~~~sh
 npm --prefix frontend ci --ignore-scripts
 npm --prefix frontend run build
-python docs/demo/render.py --openui --chart-preview --output docs/demo/openui-preview.png --chrome /path/to/chromium
-python docs/demo/render.py --openui --chrome /path/to/chromium
+python docs/demo/render_openui.py --openui --chart-preview --output docs/demo/openui-preview.png --chrome /path/to/chromium
+python docs/demo/render_openui.py --openui --chrome /path/to/chromium
 ~~~
 
 The fixture sends three fixed presentation updates and a final snapshot to the production browser host. It uses synthetic prices, a stubbed model list and no live account, model or data provider. These two frames replay a deterministic sequence. Their spacing conveys no model or network timing. Font metrics may differ by platform.

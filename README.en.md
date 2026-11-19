@@ -1,14 +1,38 @@
 # XClaw
 
-[中文手册](README.md) · [Reproduce the demo](docs/demo/README.md) · [Contributing](CONTRIBUTING.md) · [Share first-use feedback](https://github.com/dustturtle/XClaw/issues/new?title=First-use+feedback+%2F+%E9%A6%96%E6%AC%A1%E4%BD%93%E9%AA%8C%E5%8F%8D%E9%A6%88&body=What+did+you+try%3F+%E6%83%B3%E5%AE%8C%E6%88%90%E4%BB%80%E4%B9%88%EF%BC%9F%0A%0AWhat+worked+or+where+did+you+get+stuck%3F+%E5%93%AA%E4%B8%80%E6%AD%A5%E9%A1%BA%E5%88%A9%EF%BC%8C%E6%88%96%E5%8D%A1%E5%9C%A8%E5%93%AA%E9%87%8C%EF%BC%9F%0A%0APlease+use+a+made-up+example.+Omit+credentials%2C+personal+details%2C+holdings%2C+real+chats+and+logs.+%E8%AF%B7%E4%BD%BF%E7%94%A8%E8%99%9A%E6%9E%84%E7%A4%BA%E4%BE%8B%EF%BC%8C%E5%8B%BF%E8%B4%B4%E5%87%AD%E6%8D%AE%E3%80%81%E4%B8%AA%E4%BA%BA%E4%BF%A1%E6%81%AF%E3%80%81%E6%8C%81%E4%BB%93%E3%80%81%E7%9C%9F%E5%AE%9E%E5%AF%B9%E8%AF%9D%E6%88%96%E6%97%A5%E5%BF%97%E3%80%82)
+Would a trading rule have helped? Compare it with holding through the same period, then inspect the trades in XClaw’s self-hosted research chat.
 
-XClaw is a self-hosted Python agent for chat, task automation and market research. Ask questions in the web client or connect a messaging adapter. The investment tools cover quotes and history for supported mainland Chinese, Hong Kong and US securities, plus selected domestic futures. Availability varies by instrument and provider.
+[中文](README.md) · [First run](#run-locally) · [Low-bandwidth still](docs/demo/backtest.png)
 
-![The XClaw chat client showing a Chinese Markdown table comparing three synthetic daily closes](docs/demo/chat.png)
+## See the chart while the answer is still taking shape
 
-The screenshot uses a fixed question and answer. The real chat renderer formats the table; the fixture contacts neither a model nor a market-data provider.
+The five-day chart appears below the opening paragraph. The same answer then continues beneath it with the highest close. This two-stage Web replay uses synthetic prices and fixed frame durations.
 
-Web chat can also interleave prose and a chart backed by a tool result. [See the synthetic five-day chart, configuration and build guide](docs/openui.md).
+![OpenUI · DEMO](docs/demo/openui.gif)
+
+[OpenUI demo](docs/openui.md)
+
+![A synthetic backtest replay showing the question, benchmark comparison and trade ledger](docs/demo/backtest.gif)
+
+**Would switching on a 10/30-day moving-average crossover have beaten holding from March through May?** Across 65 synthetic weekday closes from March 3 to May 30, 2025, the strategy lost 8.69%, versus 1.14% for buy-and-hold. Strategy drawdown reached 12.34%. The ledger shows an April 28 purchase at 112.69 and a May 28 sale at 108.15.
+
+This 13.5-second deterministic replay uses the main-branch backtest tool and Web client. Prices are generated, questions are scripted and frame durations are fixed. The example illustrates a research method and provides no investment recommendation. [Reproduce the results](docs/demo/README.md)
+
+**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`.
+
+### Why was this on my watchlist?
+
+Save the fictional symbol DEMO with the note “check volume on Friday.” Ask for the list again and the original note comes back alongside the symbol.
+
+![Two chat turns adding DEMO and retrieving the Friday reminder](docs/demo/watchlist.png)
+
+### What did my paper position cost?
+
+Record 20 shares at 12 yuan each. Viewing the position reads back the share count and average cost and calculates the total of 240 yuan.
+
+![The chat shows a simulated purchase receipt and the calculated cost](docs/demo/portfolio.png)
+
+Both replays use fixed questions, run the actual tools against fresh in-memory databases and display their output in the Web chat renderer. No model key is needed for the replays.
 
 ## Run locally
 
@@ -32,7 +56,7 @@ Choose a provider supported by your environment, its model ID and the matching A
 2. The configured model requests tools as needed. For mainland Chinese historical prices, the source chain tries pytdx, baostock, yfinance and AkShare. A quote, a historical close and an intraday observation may have different timestamps.
 3. The agent receives tool results and returns an answer through the originating channel. SQLite stores local chat and business records. Optional skills, MCP servers and scheduled tasks extend this path.
 
-The Chinese manual covers model configuration, channels, tools, backtests, storage and scheduling. Keep the Web listener on loopback for a local trial. Configure authentication before sharing the service. A hosted model can receive prompts, conversation context and tool results; data providers receive the instruments queried. Review those boundaries before entering holdings or attaching files.
+The Chinese manual covers model configuration, channels, tools, backtests, storage and scheduling. Keep the Web listener on loopback for a local trial. Configure authentication before sharing the service. Watchlists and holdings are stored in local SQLite. When you use a hosted model, its provider can receive the current message, history and memory included in context, and tool results. Listing a watchlist can expose symbols and notes. Viewing holdings can expose share counts and costs. Market-data providers receive the instruments queried. Review those boundaries before entering holdings or attaching files.
 
 ## Build and test
 
