@@ -1,10 +1,16 @@
 # XClaw
 
-Keep the reason you are watching a stock, and check what a paper position cost. XClaw is a self-hosted chat assistant for people who keep their own investment journal.
+Would a trading rule have helped? Compare it with holding through the same period, then inspect the trades in XClaw’s self-hosted research chat.
 
-[中文](README.md) · [First run](#run-locally) · [Replay both examples](docs/demo/README.md)
+[中文](README.md) · [First run](#run-locally) · [Low-bandwidth still](docs/demo/backtest.png)
 
-**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`. Open http://127.0.0.1:8080/ with the default settings.
+![A synthetic backtest replay showing the question, benchmark comparison and trade ledger](docs/demo/backtest.gif)
+
+**Would switching on a 10/30-day moving-average crossover have beaten holding from March through May?** Across 65 synthetic weekday closes from March 3 to May 30, 2025, the strategy lost 8.69%, versus 1.14% for buy-and-hold. Strategy drawdown reached 12.34%. The ledger shows an April 28 purchase at 112.69 and a May 28 sale at 108.15.
+
+This 13.5-second deterministic replay uses the main-branch backtest tool and Web client. Prices are generated, questions are scripted and frame durations are fixed. The example illustrates a research method and provides no investment recommendation. [Reproduce the results](docs/demo/README.md)
+
+**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`.
 
 ### Why was this on my watchlist?
 

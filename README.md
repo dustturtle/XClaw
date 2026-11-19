@@ -1,10 +1,16 @@
 # XClaw
 
-把复盘时想查的事留给下次，把模拟买入的成本当场算清。XClaw 是给自己做投资笔记的人用的自托管聊天助手。
+一套择时规则值得用吗？在 XClaw 的自托管聊天界面里，把策略和一直持有放在同一区间比较，再翻看买卖记录。
 
-[English](README.en.md) · [首次运行](#快速开始) · [复现下面两段对话](docs/demo/README.md)
+[English](README.en.md) · [首次运行](#快速开始) · [低带宽静图](docs/demo/backtest.png)
 
-**第一次运行** · 安装 Python 3.12+，在仓库根目录执行 `python -m pip install -e .`、`xclaw setup`、`xclaw start --config xclaw.config.yaml`，再打开默认地址 http://127.0.0.1:8080/ 。
+![合成回测回放：提出问题、比较收益与回撤、查看交易记录](docs/demo/backtest.gif)
+
+**3 月到 5 月，按 10/30 日均线换仓，比一直持有好吗？** 在 2025-03-03 至 2025-05-30 的 65 个合成工作日样本中，均线策略亏损 8.69%，持有亏损 1.14%，策略最大回撤 12.34%。追看交易记录，可以看到 4 月 28 日以 112.69 买入，5 月 28 日以 108.15 卖出。
+
+13.5 秒确定性回放使用主线回测工具和 Web 界面。价格由公式生成，问题和镜头时长固定；结果仅用于演示研究过程，不构成投资建议。[复现案例](docs/demo/README.md)
+
+**第一次运行** · 安装 Python 3.12+，在仓库根目录运行 `python -m pip install -e .`，然后执行 `xclaw setup` 和 `xclaw start --config xclaw.config.yaml`。
 
 ### 到周五，还记得为什么关注它吗？
 

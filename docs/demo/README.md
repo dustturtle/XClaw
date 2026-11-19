@@ -20,3 +20,13 @@ Install the checkout using the steps above. Set CHROME to the path of your Chrom
 python docs/demo/render.py --chrome "$CHROME" --story watchlist --output docs/demo/watchlist.png
 python docs/demo/render.py --chrome "$CHROME" --story portfolio --output docs/demo/portfolio.png
 ~~~
+
+## Replay the moving-average comparison
+
+Install the project and Pillow in your virtual environment. From the checkout run:
+
+~~~sh
+python docs/demo/backtest.py --chrome "$CHROME"
+~~~
+
+The script injects deterministic weekday closes (including pre-period warmup) at the historical data boundary, runs the actual 10/30 SMA backtest, prints its report and captures three stages in a temporary Chrome profile. The follow-up shows the ledger from the same tool result. The dates follow weekdays rather than an exchange holiday calendar. No live quotes, language model, messaging account or server is involved.
