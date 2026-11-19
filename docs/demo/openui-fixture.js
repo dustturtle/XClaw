@@ -22,11 +22,11 @@ const blocks = [
   {id: "p1", type: "text", source: "第四天收盘最高，为 105 点。价格均为合成数据。"},
 ];
 const options = {chatId: "demo", runId: "fixture", getToken: () => "", isCurrent: () => true};
-for (const length of [1, 2, 3]) {
+for (const length of (chartPreview ? [1, 2] : [1, 2, 3])) {
   window.XClawOpenUIHost.updateLive(item, {
     version: "xclaw-live-1", round: 0, provisional: true, blocks: blocks.slice(0, length), evidence,
   }, options);
 }
-window.XClawOpenUIHost.updateLive(item, {
+if (!chartPreview) window.XClawOpenUIHost.updateLive(item, {
   version: "xclaw-live-1", round: 0, provisional: false, validated: true, blocks, evidence,
 }, options);

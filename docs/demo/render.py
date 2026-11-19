@@ -27,7 +27,10 @@ def main():
     parser.add_argument("--chrome", required=True, help="Path to Chrome or Chromium")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--openui", action="store_true", help="Render the synthetic history card fixture")
+    parser.add_argument("--chart-preview", action="store_true", help="Stop the OpenUI fixture after the chart appears")
     args = parser.parse_args()
+    if args.chart_preview and not args.openui:
+        parser.error("--chart-preview requires --openui")
     page = web._build_chat_page_html(auth_enabled=False, model_name="演示样本", provider_name="fixture",
                                     supports_openui=args.openui)
     page = page.replace("<head>", """<head><script>
@@ -49,6 +52,7 @@ def main():
     """
     if args.openui:
         script = Path(__file__).with_name("openui-fixture.js").read_text()
+        script = "const chartPreview = " + json.dumps(args.chart_preview) + ";\n" + script
     page = page.replace("</body>", f"<script>{script}</script></body>")
     output = args.output or Path("docs/demo/openui.png" if args.openui else "docs/demo/chat.png")
     with tempfile.TemporaryDirectory() as directory:

@@ -2,6 +2,12 @@
 
 OpenUI is an optional presentation layer for Web chat. Text remains readable when a chart cannot be rendered. In inline mode the server can send text and a read-only card in the same answer. A history card displays the values returned by a matching tool call. A saved answer can be reopened from its evidence snapshot. Explicit refresh may contact the data provider and return different values.
 
+**1. The chart appears before the closing paragraph.**
+
+![Provisional answer with five synthetic closing prices](demo/openui-preview.png)
+
+**2. The final answer includes the closing paragraph.**
+
 ![Five synthetic closing prices rendered by the history card](demo/openui.png)
 
 ## Try the fixture
@@ -11,10 +17,11 @@ From a source checkout, install the Python project and run the following with No
 ~~~sh
 npm --prefix frontend ci --ignore-scripts
 npm --prefix frontend run build
+python docs/demo/render.py --openui --chart-preview --output docs/demo/openui-preview.png --chrome /path/to/chromium
 python docs/demo/render.py --openui --chrome /path/to/chromium
 ~~~
 
-The fixture sends three fixed presentation updates and a final snapshot to the production browser host. It uses synthetic prices, a stubbed model list and no live account, model or data provider. The screenshot shows the final frame. Font metrics may differ by platform.
+The fixture sends three fixed presentation updates and a final snapshot to the production browser host. It uses synthetic prices, a stubbed model list and no live account, model or data provider. These two frames replay a deterministic sequence. Their spacing conveys no model or network timing. Font metrics may differ by platform.
 
 ## Enable it for your own chat
 
