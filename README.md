@@ -10,7 +10,7 @@
 
 ![OpenUI · DEMO](docs/demo/openui.gif)
 
-[OpenUI demo](docs/openui.md)
+[复现合成图表（无需模型密钥）](docs/openui.md#try-the-fixture) · [在自己的 Web 会话中启用 OpenUI](docs/openui.md#enable-it-for-your-own-chat)
 
 ![合成回测回放：提出问题、比较收益与回撤、查看交易记录](docs/demo/backtest.gif)
 
@@ -18,7 +18,7 @@
 
 13.5 秒确定性回放使用主线回测工具和 Web 界面。价格由公式生成，问题和镜头时长固定；结果仅用于演示研究过程，不构成投资建议。[复现案例](docs/demo/README.md)
 
-**第一次运行** · 安装 Python 3.12+，在仓库根目录运行 `python -m pip install -e .`，然后执行 `xclaw setup` 和 `xclaw start --config xclaw.config.yaml`。
+**第一次运行** · 安装 Python 3.12+，在仓库根目录运行 `python -m pip install -e .`，然后执行 `xclaw setup` 和 `xclaw start --config xclaw.config.yaml`。 OpenUI 默认关闭。从源码运行时，先构建前端，再配置 Web 会话。 [在自己的 Web 会话中启用 OpenUI](docs/openui.md#enable-it-for-your-own-chat)
 
 ### 到周五，还记得为什么关注它吗？
 
@@ -134,6 +134,8 @@ XClaw 可以保留现有渠道、业务工具和 SQLite 存储，通过 HTTP/SSE
 ---
 
 ## 快速开始
+
+OpenUI 默认关闭。从源码运行时，先构建前端，再配置 Web 会话。 [在自己的 Web 会话中启用 OpenUI](docs/openui.md#enable-it-for-your-own-chat)
 
 ### 环境要求
 

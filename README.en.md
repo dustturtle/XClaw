@@ -10,7 +10,7 @@ The five-day chart appears below the opening paragraph. The same answer then con
 
 ![OpenUI · DEMO](docs/demo/openui.gif)
 
-[OpenUI demo](docs/openui.md)
+[Replay the synthetic chart without a model key](docs/openui.md#try-the-fixture) · [Enable OpenUI in your own Web chat](docs/openui.md#enable-it-for-your-own-chat)
 
 ![A synthetic backtest replay showing the question, benchmark comparison and trade ledger](docs/demo/backtest.gif)
 
@@ -18,7 +18,7 @@ The five-day chart appears below the opening paragraph. The same answer then con
 
 This 13.5-second deterministic replay uses the main-branch backtest tool and Web client. Prices are generated, questions are scripted and frame durations are fixed. The example illustrates a research method and provides no investment recommendation. [Reproduce the results](docs/demo/README.md)
 
-**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`.
+**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`. OpenUI is off by default. When running from source, build the frontend and configure your Web chat to enable cards. [Enable OpenUI in your own Web chat](docs/openui.md#enable-it-for-your-own-chat)
 
 ### Why was this on my watchlist?
 
@@ -35,6 +35,8 @@ Record 20 shares at 12 yuan each. Viewing the position reads back the share coun
 Both replays use fixed questions, run the actual tools against fresh in-memory databases and display their output in the Web chat renderer. No model key is needed for the replays.
 
 ## Run locally
+
+OpenUI is off by default. When running from source, build the frontend and configure your Web chat to enable cards. [Enable OpenUI in your own Web chat](docs/openui.md#enable-it-for-your-own-chat)
 
 Use Python 3.12 or newer. The Dockerfile on this branch uses Python 3.11, below the package requirement.
 
@@ -60,10 +62,12 @@ The Chinese manual covers model configuration, channels, tools, backtests, stora
 
 ## Build and test
 
+From the repository root, use Node.js 22 with npm, Python 3.12, uv and Bash. Run the same entry point as GitHub Actions:
+
 ~~~sh
-uv sync --extra dev
-uv build
-uv run python -m pytest tests/ -v
+bash scripts/uv-build.sh
 ~~~
+
+It type-checks, tests and builds the frontend, builds the Python distribution, verifies that the wheel contains the generated OpenUI assets, and runs the full Python test suite.
 
 [GitHub Actions](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml) reports build and test results per run. Provider credentials, market hours and upstream availability affect live behavior. [MIT license](LICENSE).
