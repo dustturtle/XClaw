@@ -34,3 +34,5 @@ The script injects deterministic weekday closes (including pre-period warmup) at
 **如何读交易记录。** 策略在预热期已开始交易。2 月 28 日以 105.96 买入的模拟持仓延续至 3 月 3 日，因此区间内第一条记录是 4 月 2 日以 103.15 卖出。引擎用当天收盘价计算均线信号，并假设以同一收盘价全仓成交，未计手续费和滑点。策略收益比较 3 月 3 日与 5 月 30 日收盘时的账户净值；买入持有基准比较这两天的合成收盘价。回撤也只在这个区间内计算。
 
 **Reading the ledger.** The strategy trades during warmup. Its February 28 purchase at 105.96 was still open on March 3, so the first entry in the reporting window is the April 2 sale at 103.15. The engine computes each signal at the close and assumes a full-position fill at that same close, with zero fees and slippage. Strategy return compares closing account equity on March 3 and May 30. Buy-and-hold compares the synthetic closing prices on those same dates. Drawdown is measured within that window.
+
+[Replay the inline OpenUI chart](../openui.md)

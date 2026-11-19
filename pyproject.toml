@@ -68,6 +68,8 @@ include = ["xclaw*"]
 "xclaw.channels" = ["static/*.css", "static/*.js", "static/*.txt"]
 
 [tool.pytest.ini_options]
+# Emit thread stacks for a stalled test without cancelling or skipping it.
+faulthandler_timeout = 120
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]

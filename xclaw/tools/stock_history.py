@@ -13,7 +13,8 @@ from xclaw.datasources.futures_cn import (
     normalize_cn_future_symbol,
 )
 from xclaw.tools import RiskLevel, Tool, ToolContext, ToolResult
-from xclaw.tools.market_symbols import normalize_hk_yf_symbol
+from xclaw.tools.market_symbols import hk_history_index, normalize_hk_yf_symbol
+from xclaw.datasources.hk_index_history import HK_TZ, history_text
 
 
 class StockHistoryTool(Tool):
@@ -33,6 +34,7 @@ class StockHistoryTool(Tool):
             "获取股票、指数或国内商品期货历史 K 线数据（日/周/月线），包括开盘价、收盘价、最高价、最低价、成交量，"
             "以及已预计算的涨跌幅(%)和振幅(%)，无需手动计算涨跌幅。"
             "查询指数（如上证指数、深证成指）时请将 asset_type 设为 index。"
+            "港股主要指数使用 market=HK、asset_type=index、symbol=HSI/HSTECH/HSCEI，无需改用美股市场。"
             "查询国内商品期货时请将 asset_type 设为 future。"
             "如需判断跳空缺口，请优先使用 stock_gap_analysis 工具，不要自行根据K线手算。"
         )
@@ -86,7 +88,7 @@ class StockHistoryTool(Tool):
 
     async def execute(self, params: dict[str, Any], context: ToolContext) -> ToolResult:
         import asyncio
-        from datetime import date, timedelta
+        from datetime import date, datetime, timedelta
 
         symbol = params.get("symbol", "").strip()
         market = params.get("market", "CN").upper()
@@ -101,16 +103,22 @@ class StockHistoryTool(Tool):
             if bare in _INDEX_BARE_TO_PREFIXED:
                 symbol = _INDEX_BARE_TO_PREFIXED[bare]
 
+        hk_index = hk_history_index(symbol, market)
+        today = datetime.now(HK_TZ).date() if hk_index else date.today()
         # Date defaults
-        end_date = params.get("end_date") or date.today().strftime("%Y-%m-%d")
+        end_date = params.get("end_date") or today.strftime("%Y-%m-%d")
         start_date = params.get("start_date") or (
-            date.today() - timedelta(days=90)
+            today - timedelta(days=90)
         ).strftime("%Y-%m-%d")
 
         if not symbol:
             return ToolResult(content="标的代码不能为空", is_error=True)
 
         try:
+            if hk_index:
+                return ToolResult(await history_text(hk_index, period, start_date, end_date, limit))
+            if market == "HK" and (asset_type == "index" or symbol.startswith("^")):
+                return ToolResult(content=f"暂不支持港股指数 {symbol}；支持 HSI、HSTECH、HSCEI。请勿改用个股或其他市场代替。", is_error=True)
             if market == "CN" and asset_type == "future":
                 return await self._future_history(symbol, start_date, end_date, limit)
             if market == "CN":

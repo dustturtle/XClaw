@@ -1,0 +1,11 @@
+# Set XCLAW_API_KEY in the environment. Replace the model and endpoint together.
+agent_backend: native
+llm_provider: openai-responses
+base_url: https://api.example.invalid/v1
+model: your-model-id
+web_model_options: []
+openui_enabled: true
+openui_inline_stream: true
+web_host: 127.0.0.1
+web_port: 8080
+data_dir: ./xclaw.data

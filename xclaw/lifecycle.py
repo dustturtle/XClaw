@@ -27,6 +27,8 @@ class LifecycleJournal:
     def emit(self, event: str, **fields) -> None:
         allowed = {"child_pid", "component", "exit_code", "signal", "exception_type",
                    "healthy", "duration_seconds", "receipt_id", "run_id", "frames"}
+        if event == "request_stage_timing":
+            allowed.update({"elapsed_ms", "outcome", "stages", "dropped"})
         row = {
             "time": datetime.now(timezone.utc).isoformat(), "event": event,
             "role": self.role, "boot_id": self.boot_id, "pid": os.getpid(),

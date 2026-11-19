@@ -39,6 +39,10 @@ async def test_concurrent_retry_and_restart_replay_one_durable_result(db):
     async with client(app) as c:
         responses = await asyncio.gather(*(c.post("/api/chat", json=payload) for _ in range(8)))
         assert {r.status_code for r in responses} == {202}
+        for _ in range(100):
+            if called:
+                break
+            await asyncio.sleep(0.001)
         assert called == 1
         assert (await c.get(f"/api/chat/receipts/{RID}?chat_id=room")).json()["status"] == "processing"
         changed = await c.post("/api/chat", json={**payload, "message": "different"})

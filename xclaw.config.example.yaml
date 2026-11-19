@@ -29,6 +29,9 @@ powercore_finalization_reserve: 120.0 # 本地启动器为服务端配置的收�
 # ── 渠道配置（中国用户渠道）──────────────────────────────────────────────────
 # Web 界面（默认启用，绑定本地，不暴露公网）
 web_enabled: true
+# Optional OpenUI UI stage: extra model calls after completed answers.
+# Disable to roll back to the original text-only chat; existing data is retained.
+openui_enabled: false
 web_host: "127.0.0.1"
 web_port: 8080
 web_auth_token: ""                 # 留空则不验证，生产环境务必设置

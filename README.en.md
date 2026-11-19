@@ -4,6 +4,14 @@ Would a trading rule have helped? Compare it with holding through the same perio
 
 [中文](README.md) · [First run](#run-locally) · [Low-bandwidth still](docs/demo/backtest.png)
 
+## See the chart while the answer is still taking shape
+
+The five-day chart appears below the opening paragraph. The same answer then continues beneath it with the highest close. This two-stage Web replay uses synthetic prices and fixed frame durations.
+
+![OpenUI · DEMO](docs/demo/openui.gif)
+
+[OpenUI demo](docs/openui.md)
+
 ![A synthetic backtest replay showing the question, benchmark comparison and trade ledger](docs/demo/backtest.gif)
 
 **Would switching on a 10/30-day moving-average crossover have beaten holding from March through May?** Across 65 synthetic weekday closes from March 3 to May 30, 2025, the strategy lost 8.69%, versus 1.14% for buy-and-hold. Strategy drawdown reached 12.34%. The ledger shows an April 28 purchase at 112.69 and a May 28 sale at 108.15.

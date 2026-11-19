@@ -80,6 +80,10 @@ class Settings(BaseSettings):
 
     # ── Web channel ──────────────────────────────────────────────────────────
     web_enabled: bool = True
+    # Explicit operator allowlist; never discover or enable models implicitly.
+    web_model_options: list[str] = Field(default_factory=list, max_length=32)
+    openui_inline_stream: bool = False  # Isolated opt-in single-model narrative/card records
+    openui_enabled: bool = False  # Opt-in: adds a model-backed UI presentation stage
     web_host: str = "127.0.0.1"
     web_port: int = 8080
     web_auth_token: str = ""
@@ -165,7 +169,7 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"anthropic", "openai", "deepseek", "ollama", "openai-codex"}
+        allowed = {"anthropic", "openai", "deepseek", "ollama", "openai-codex", "openai-responses"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}")
         return v

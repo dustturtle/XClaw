@@ -16,12 +16,19 @@ class RiskLevel(str, Enum):
     HIGH = "high"
 
 
+class ToolExecutionEffect(Enum):
+    """Trusted implementation metadata, never inferred from tool text or model input."""
+    NOT_APPLIED = "not_applied"
+
+
 class ToolResult:
     """Return type from Tool.execute()."""
 
-    def __init__(self, content: str, is_error: bool = False) -> None:
+    def __init__(self, content: str, is_error: bool = False, *,
+                 execution_effect: ToolExecutionEffect | None = None) -> None:
         self.content = content
         self.is_error = is_error
+        self.execution_effect = execution_effect
 
     def __repr__(self) -> str:
         return f"ToolResult(is_error={self.is_error}, content={self.content!r})"

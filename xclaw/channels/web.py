@@ -36,7 +36,7 @@ from xclaw.investment.report_service import InvestmentReportService
 from xclaw.investment.report_export_service import ReportExportService
 from xclaw.oauth import OAuthLoginNotFoundError
 from xclaw.attachments import ChatBodyLimitMiddleware, ImageAttachment, MAX_IMAGES
-from xclaw.responses import DirectReply
+from xclaw.responses import DirectReply, RejectedReply
 from xclaw.receipts import ReceiptStore, ReceiptConflict, REQUEST_ID_PATTERN
 
 # Rate limiting (slowapi)
@@ -52,12 +52,21 @@ except ImportError:
 
 # ── Request / Response models (module-level for annotation resolution) ────────
 
+class JournalAcknowledgeRequest(BaseModel):
+    chat_id: str = Field(min_length=1, max_length=128)
+    execution_id: str = Field(min_length=1, max_length=128)
+    confirmed_reviewed: Literal[True]
+    execution_stopped: Literal[True]
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class ChatRequest(BaseModel):
+    model: str | None = Field(default=None, min_length=1, max_length=200)
     request_id: str | None = Field(default=None, pattern=REQUEST_ID_PATTERN)
     chat_id: str = "web_default"
     message: str = ""
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_IMAGES)
-    execution_mode: Literal["standard", "analysis"] | None = None
+    execution_mode: Literal["standard", "analysis", "prepare"] | None = None
 
     @model_validator(mode="after")
     def require_content(self):
@@ -70,6 +79,7 @@ class ChatResponse(BaseModel):
     chat_id: str
     reply: str
     delivery: Literal["direct"] | None = None
+    status: Literal["failed"] | None = None
 
 
 _RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
@@ -81,6 +91,8 @@ class ChatCancelRequest(BaseModel):
 
 
 class ChatProgressMessage(BaseModel):
+    message_id: int | None = None
+    presentation_id: str | None = None
     role: Literal["user", "assistant"]
     content: str
     run_id: str | None = Field(default=None, pattern=_RUN_ID_PATTERN)
@@ -95,6 +107,8 @@ class ChatProgressSnapshot(BaseModel):
     wall_time_ms: int = Field(ge=0)
     sequence: int = Field(ge=0)
     reply: str | None = None
+    message_id: int | None = None
+    presentation_id: str | None = None
     error_code: str | None = None
     messages: list[ChatProgressMessage] | None = None
 
@@ -158,11 +172,18 @@ def _build_chat_page_html(
     supports_images: bool = False,
     supports_progress: bool = False,
     supports_receipts: bool = False,
+    supports_openui: bool = False,
+    supports_prepare: bool = False,
 ) -> str:
     """Return a lightweight browser chat UI for local validation."""
     auth_flag = json.dumps(auth_enabled)
     safe_model = html.escape(model_name or "unknown")
     safe_provider = html.escape(provider_name or "unknown")
+    openui_assets = (
+        '<link rel="stylesheet" href="/chat-assets/openui.css" />'
+        '<script src="/chat-assets/openui.js"></script>'
+        '<script src="/chat-assets/openui-host.js"></script>'
+    ) if supports_openui else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -172,6 +193,7 @@ def _build_chat_page_html(
   <link rel="stylesheet" href="/chat-assets/chat.css?v=2" />
   <script src="/chat-assets/markdown-it.min.js"></script>
   <script src="/chat-assets/markdown.js?v=2"></script>
+  {openui_assets}
 </head>
 <body>
   <div class="shell">
@@ -179,7 +201,10 @@ def _build_chat_page_html(
       <header class="toolbar">
         <div class="toolbar-title">
           <strong>XClaw <span class="brand-caption">对话</span></strong>
-          <span class="model-name">{safe_model}</span>
+          <label class="sr-only" for="model-select">本次对话模型</label>
+          <select class="model-select" id="model-select" aria-label="本次对话模型" title="仅用于本会话的新请求，不修改服务默认模型" disabled>
+            <option value="">加载模型…</option>
+          </select>
         </div>
         <div class="toolbar-actions">
           <div class="status" id="status-pill">准备就绪</div>
@@ -195,15 +220,16 @@ def _build_chat_page_html(
                 <label for="auth-token">Bearer Token（可选）</label>
                 <input id="auth-token" type="password" autocomplete="off" placeholder="服务启用鉴权时在这里填" />
               </div>
-              <div class="field" {('' if supports_progress else 'hidden')}>
+              <div class="field" {('' if supports_progress or supports_prepare else 'hidden')}>
                 <label for="execution-mode">执行模式</label>
                 <select id="execution-mode">
-                  <option value="standard">普通 · 3 分钟</option>
-                  <option value="analysis" selected>分析 · 10 分钟</option>
+                  <option value="standard" {("selected" if supports_prepare and not supports_progress else "")}>普通 · 3 分钟</option>
+                  <option value="analysis" {("" if supports_prepare and not supports_progress else "selected")}>分析 · 10 分钟</option>
+                  {('<option value="prepare">预览操作，确认后执行 · 3 分钟</option>' if supports_prepare else '')}
                 </select>
               </div>
               <p class="settings-note" id="composer-note">{("当前服务启用了鉴权，请先填写 Token。" if auth_enabled else "当前服务未启用鉴权，可以直接开始聊天。")}</p>
-              <div class="settings-meta">{safe_provider} / {safe_model}</div>
+              <div class="settings-meta">{safe_provider} / <span class="model-name">{safe_model}</span></div>
               <button class="ghost" id="clear-btn" type="button">清空显示</button>
               <button class="ghost" id="release-receipt-btn" type="button" hidden>结束本次提交核对</button>
               <p class="settings-note">只清空页面，不会取消任务或重置上下文。重置上下文请发送 /reset。</p>
@@ -212,15 +238,22 @@ def _build_chat_page_html(
           </details>
         </div>
       </header>
-      <section class="messages" id="messages" aria-label="对话消息" aria-live="polite"></section>
+      <section class="messages" id="messages" tabindex="0" aria-label="对话消息" aria-live="polite"></section>
+      <details id="write-recovery" hidden>
+        <summary id="write-recovery-summary">有写操作需要人工核对</summary>
+        <p>这些操作可能已经生效，后续写入已暂停。请先只读查询对应业务记录，停止原执行，再逐条确认。本次确认不会重试，也不表示原操作成功。</p>
+        <button id="refresh-write-recovery" type="button">刷新待核对记录</button>
+        <div id="write-recovery-records"></div>
+      </details>
       <section class="composer">
+        <button id="follow-tail" type="button" hidden>↓ 返回最新消息</button>
         <div class="composer-inner">
           <div class="run-controls" id="run-controls" {('' if supports_progress else 'hidden')}>
             <details class="run-progress">
               <summary><strong id="run-stage">尚未开始任务</strong><span id="run-time">已耗时 0 秒 / 预算 10 分钟</span></summary>
               <div class="progress-detail" id="run-message" role="status" aria-live="polite">显示实际执行进度，不是逐字输出。</div>
             </details>
-            <button class="ghost compact" id="cancel-run-btn" type="button" disabled>取消任务</button>
+            <button class="ghost compact" id="cancel-run-btn" type="button" {('' if supports_progress else 'hidden')} disabled>取消任务</button>
             <button class="ghost compact" id="resume-progress-btn" type="button" hidden>重新连接</button>
           </div>
           <div class="composer-box">
@@ -247,6 +280,9 @@ def _build_chat_page_html(
     const AUTH_REQUIRED = {auth_flag};
     const SUPPORTS_PROGRESS = {json.dumps(supports_progress)};
     const SUPPORTS_RECEIPTS = {json.dumps(supports_receipts)};
+    const SUPPORTS_OPENUI = {json.dumps(supports_openui)};
+    const SUPPORTS_PREPARE = {json.dumps(supports_prepare)};
+    const DEFAULT_EXECUTION_MODE = SUPPORTS_PREPARE && !SUPPORTS_PROGRESS ? "standard" : "analysis";
     const POLL_INTERVAL_MS = 1500;
     const POLL_TIMEOUT_MS = 8000;
     const MAX_POLLS = 600;
@@ -260,6 +296,76 @@ def _build_chat_page_html(
     }};
     const STORAGE_KEYS = {{chatId: "xclaw.chat_id", token: "xclaw.auth_token"}};
     const messagesEl = document.getElementById("messages");
+
+    let followingTail = true, tailFrame = 0, lastTop = 0;
+    const tailButton = document.getElementById("follow-tail");
+    tailButton.addEventListener("click", () => followMessages(true));
+    function followMessages(force = false) {{
+      if (force) {{ followingTail = true; tailButton.hidden = true; }}
+      if (!followingTail || tailFrame) return;
+      tailFrame = requestAnimationFrame(() => {{
+        tailFrame = 0;
+        if (!followingTail) return;
+        const bottom = Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
+        if (Math.abs(messagesEl.scrollTop - bottom) > 1) messagesEl.scrollTop = bottom;
+        lastTop = messagesEl.scrollTop;
+      }});
+    }}
+    let direction = 0, intentUntil = 0;
+    function scrollIntent(delta, target) {{
+      if (!delta || messagesEl.scrollHeight <= messagesEl.clientHeight) return;
+      for (let el = target; el && el !== messagesEl; el = el.parentElement) {{
+        if (el.matches?.('input, textarea, select, [contenteditable=true]')) return;
+        if (el.scrollHeight > el.clientHeight && /auto|scroll/.test(getComputedStyle(el).overflowY)
+            && (delta < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1)) return;
+      }}
+      direction = Math.sign(delta); intentUntil = performance.now() + 1200;
+      if (direction < 0) {{ followingTail = false; tailButton.hidden = false; }}
+      else if (messagesEl.scrollHeight - messagesEl.clientHeight - messagesEl.scrollTop <= 4) followMessages(true);
+    }}
+    messagesEl.addEventListener('wheel', e => {{
+      if (!e.shiftKey && !e.ctrlKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) scrollIntent(e.deltaY, e.target);
+    }}, {{passive:true}});
+    let touchY = 0, touchX = 0;
+    messagesEl.addEventListener('touchstart', e => {{
+      touchY = e.touches[0].clientY; touchX = e.touches[0].clientX;
+    }}, {{passive:true}});
+    messagesEl.addEventListener('touchmove', e => {{
+      const t = e.touches[0], dy = touchY - t.clientY;
+      if (e.touches.length === 1 && Math.abs(dy) > Math.abs(touchX - t.clientX)) scrollIntent(dy,e.target);
+      touchY = t.clientY; touchX = t.clientX;
+    }}, {{passive:true}});
+    messagesEl.addEventListener('keydown', e => {{
+      if (e.defaultPrevented || e.altKey || e.metaKey || e.ctrlKey || e.target.closest?.(
+        'input,textarea,select,button,summary,[contenteditable]:not([contenteditable=false]),[role=slider],[role=menu],[role=menubar],[role=menuitem],[role=button],[role=listbox],[role=tablist],[role=spinbutton],[role=combobox],[role=tree],[role=grid]'
+      )) return;
+      if (['ArrowUp','PageUp','Home'].includes(e.key) || (e.key === ' ' && e.shiftKey)) scrollIntent(-1,e.target);
+      if (['ArrowDown','PageDown','End'].includes(e.key) || (e.key === ' ' && !e.shiftKey)) scrollIntent(1,e.target);
+    }});
+    let draggingBar = false;
+    messagesEl.addEventListener('pointerdown', e => {{
+      if (e.pointerType === 'mouse' && e.target === messagesEl && e.clientX >= messagesEl.getBoundingClientRect().right - Math.max(14,messagesEl.offsetWidth - messagesEl.clientWidth)) {{
+        draggingBar = true; followingTail = false; tailButton.hidden = false;
+      }}
+    }});
+    window.addEventListener('pointerup', () => {{
+      if (draggingBar) {{ draggingBar = false; scrollIntent(1); }}
+    }});
+    messagesEl.addEventListener('scroll', () => {{
+      const top = messagesEl.scrollTop, gap = messagesEl.scrollHeight - messagesEl.clientHeight - top;
+      if (!draggingBar && direction > 0 && performance.now() <= intentUntil && top > lastTop && gap <= 4) followMessages(true);
+      lastTop = top;
+    }}, {{passive:true}});
+    const tailSizes = new ResizeObserver(() => followMessages());
+    tailSizes.observe(messagesEl);
+    new MutationObserver(records => {{
+      for (const record of records) {{
+        for (const el of record.removedNodes) if (el.nodeType === 1) tailSizes.unobserve(el);
+        for (const el of record.addedNodes) if (el.nodeType === 1) tailSizes.observe(el);
+      }}
+      followMessages();
+    }}).observe(messagesEl, {{childList:true}});
+
     const chatIdInput = document.getElementById("chat-id");
     const tokenInput = document.getElementById("auth-token");
     const messageInput = document.getElementById("message-input");
@@ -269,6 +375,7 @@ def _build_chat_page_html(
     const clearImagesBtn = document.getElementById("clear-images-btn");
     const previewEl = document.getElementById("attachment-preview");
     const modeInput = document.getElementById("execution-mode");
+    const modelInput = document.getElementById("model-select");
     const cancelBtn = document.getElementById("cancel-run-btn");
     const resumeBtn = document.getElementById("resume-progress-btn");
     const stageEl = document.getElementById("run-stage");
@@ -295,7 +402,10 @@ def _build_chat_page_html(
       return ctx.token ? {{"Authorization": "Bearer " + ctx.token}} : {{}};
     }}
 
-    function setStatus(text) {{ statusPill.textContent = text; }}
+    function setStatus(text, failed = false) {{
+      statusPill.textContent = text;
+      statusPill.setAttribute("style", failed ? "color:#9f331c;background:#fff0e9;border-color:#e5b19f" : "");
+    }}
 
     function renderFiles(files) {{
       previewUrls.forEach(url => URL.revokeObjectURL(url));
@@ -318,15 +428,15 @@ def _build_chat_page_html(
       if (!ctx?.draftReady) return;
       const p = ctx.pending;
       const receipt = p?.requestId && !p.receiptFinished ? {{
-        requestId: p.requestId, fingerprint: p.fingerprint, mode: p.mode, draftText: p.draftText
+        requestId: p.requestId, fingerprint: p.fingerprint, mode: p.mode, model: p.model, draftText: p.draftText
       }} : null;
-      const draft = {{text: messageInput.value, files: [...selectedFiles], mode: modeInput.value,
+      const draft = {{text: messageInput.value, files: [...selectedFiles], mode: modeInput.value, model: modelInput.value,
         receipt, requestFiles: p?.files || []}};
       drafts.set(ctx.key, draft);
       if (ctx.draftKey) {{
-        stored(sessionStorage, ctx.draftKey, JSON.stringify({{text: draft.text, mode: draft.mode, receipt}}));
+        stored(sessionStorage, ctx.draftKey, JSON.stringify({{text: draft.text, mode: draft.mode, model: draft.model, receipt}}));
         if (SUPPORTS_RECEIPTS) stored(localStorage, ctx.draftKey + ".receipt",
-          JSON.stringify(receipt ? {{requestId: receipt.requestId, fingerprint: receipt.fingerprint, mode: receipt.mode}} : null));
+          JSON.stringify(receipt ? {{requestId: receipt.requestId, fingerprint: receipt.fingerprint, mode: receipt.mode, model: receipt.model}} : null));
       }}
     }}
 
@@ -339,10 +449,20 @@ def _build_chat_page_html(
       }});
     }}
 
-    function appendMessage(role, text, attachments = []) {{
-      const followTail = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
+    function syncPresentationStatus(ctx) {{
+      const view = ctx.presentation;
+      if (!view || !current(ctx) || ctx.pending !== view.pending || !view.status) return;
+      const labels = {{generating:"正在整理图表",completed:"响应完成",failed:"文字已完成，图表未完成"}};
+      setStatus(labels[view.status], view.status === "failed");
+      stageEl.textContent = view.status === "generating" ? "整理图表" : view.status === "failed" ? "图表未完成" : "已完成";
+    }}
+
+    function appendMessage(role, text, attachments = [], history = false, allowUI = true, identity = {{}}) {{
+      if (role === "user" && active) active.presentation = null;
       const item = document.createElement("article");
       item.className = "message " + role;
+      const verifiedModel = history ? identity.model : identity.response_model;
+      if (role === "assistant" && typeof verifiedModel === "string" && verifiedModel) item.setAttribute("data-model", verifiedModel);
       if (role === "assistant" && window.renderChatMarkdown) {{
         const content = document.createElement("div");
         content.className = "markdown";
@@ -366,8 +486,26 @@ def _build_chat_page_html(
         item.appendChild(img);
       }});
       messagesEl.appendChild(item);
-      if (role === "user") messagesEl.scrollTop = messagesEl.scrollHeight;
-      else if (followTail) messagesEl.scrollTop = Math.max(0, item.offsetTop - messagesEl.offsetTop - 24);
+      if (role === "assistant" && SUPPORTS_OPENUI && active && allowUI) {{
+        const ctx = active;
+        const view = !history ? {{pending:ctx.pending,status:null}} : null;
+        if (view) ctx.presentation = view;
+        void window.XClawOpenUIHost?.attach(item, text, {{chatId:ctx.chatId, history,
+          getToken:() => ctx.token, isCurrent:() => current(ctx),messageId:identity.message_id,presentationId:identity.presentation_id,
+          onPresentationStatus:status => {{
+            if (!view || !current(ctx) || ctx.presentation !== view || ctx.pending !== view.pending
+                || !["generating","completed","failed"].includes(status)) return;
+            view.status = status;
+            syncPresentationStatus(ctx);
+          }},
+          onContinue:message => {{
+            if (!current(ctx) || sendBtn.disabled || messageInput.value.trim()) return;
+            messageInput.value = message;
+            void sendMessage();
+          }}
+        }});
+      }}
+      followMessages(role === "user" && !history);
     }}
 
     function controls(ctx) {{
@@ -375,17 +513,21 @@ def _build_chat_page_html(
       const status = ctx.snapshot?.status;
       const busy = ctx.syncing || ctx.cancelling || (ctx.pending && !ctx.pending.settled) || ["queued", "running"].includes(status)
         || (ACTIVE.has(status) && ["reconnecting", "cancelling"].includes(ctx.snapshot?.stage));
-      sendBtn.disabled = Boolean(busy);
+      if (!SUPPORTS_PROGRESS) document.getElementById("run-controls").hidden = !busy && !(ctx.pending?.requestId && !ctx.pending.receiptFinished);
+      sendBtn.disabled = Boolean(busy || !ctx.modelsReady || !ctx.modelOptions?.includes(modelInput.value));
       sendBtn.textContent = busy ? (ctx.observationPaused ? "待确认" : "处理中") : status === "waiting_input" ? "继续" : "发送";
       imageInput.disabled = Boolean(busy);
       clearImagesBtn.disabled = Boolean(busy);
       modeInput.disabled = Boolean(busy || status === "waiting_input");
+      modelInput.disabled = Boolean(busy || !ctx.modelsReady || status === "waiting_input"
+        || (ctx.pending?.requestId && !ctx.pending.receiptFinished));
       cancelBtn.disabled = ctx.cancelling || ctx.snapshot?.stage === "cancelling" || !ctx.snapshot?.run_id || !ACTIVE.has(status);
       document.getElementById("release-receipt-btn").hidden = !(ctx.pending?.requestId
         && ctx.pending.settled && !ctx.pending.receiptFinished);
     }}
 
     function stopObservation(ctx) {{
+      clearLiveText(ctx);
       clearTimeout(ctx.timer);
       ctx.epoch++;
       ctx.controller?.abort();
@@ -402,6 +544,72 @@ def _build_chat_page_html(
       controls(ctx);
     }}
 
+
+    function recoverySummary(records) {{
+      return records.length && records.every(row => row.tool_name === "strategy_scan")
+        ? "上次策略分析需要核对" : "有写操作需要人工核对";
+    }}
+
+    async function loadWriteRecovery(ctx) {{
+      if (!current(ctx) || !ctx.chatId || (AUTH_REQUIRED && !ctx.token)) return;
+      const panel = document.getElementById("write-recovery");
+      const list = document.getElementById("write-recovery-records");
+      try {{
+        const response = await fetch("/api/chat/write-recovery?" + new URLSearchParams({{chat_id: ctx.chatId}}), {{headers: headers(ctx)}});
+        if (!response.ok) throw new Error("待核对记录暂时无法读取，请稍后刷新。");
+        const data = await response.json();
+        if (!current(ctx)) return;
+        list.replaceChildren();
+        panel.hidden = !(data.records || []).length;
+        document.getElementById("write-recovery-summary").textContent = recoverySummary(data.records || []);
+        for (const row of data.records || []) {{
+          const section = document.createElement("section");
+          const info = document.createElement("div");
+          let args = {{}};
+          try {{ args = JSON.parse(row.arguments_json); }} catch (_error) {{ /* Raw parameters remain available below. */ }}
+          const isStrategy = row.tool_name === "strategy_scan";
+          const title = document.createElement("strong");
+          const symbol = typeof args?.symbol === "string" ? " · " + args.symbol : "";
+          title.textContent = (isStrategy ? "策略扫描（本地分析记录）" : row.tool_name) + symbol + " · 待核对";
+          info.appendChild(title);
+          const explanation = document.createElement("p");
+          explanation.textContent = isStrategy
+            ? "这是策略分析，不是买入、卖出或下单。扫描会保存本地分析记录；本次是否已经保存尚未确认。请只读查看该标的的策略扫描记录，不要直接重复执行。"
+            : "该操作的实际结果尚未确认，可能已经生效。请只读核对对应业务记录，不要直接重复执行。";
+          info.appendChild(explanation);
+          const time = document.createElement("p"); time.textContent = "开始时间：" + row.created_at + " UTC"; info.appendChild(time);
+          const details = document.createElement("details");
+          const summary = document.createElement("summary"); summary.textContent = "查看操作参数"; details.appendChild(summary);
+          const raw = document.createElement("pre"); raw.textContent = row.arguments_json; details.appendChild(raw);
+          info.appendChild(details); section.appendChild(info);
+          const checks = ["我已只读核对实际业务结果", "我确认原执行已停止"] .map(text => {{
+            const label = document.createElement("label"), input = document.createElement("input");
+            input.type = "checkbox"; label.appendChild(input); label.appendChild(document.createTextNode(text)); section.appendChild(label); return input;
+          }});
+          const note = document.createElement("textarea"); note.placeholder = "核对说明（例如实际查到的记录、是否已生效）"; note.maxLength = 2000; section.appendChild(note);
+          const button = document.createElement("button"); button.textContent = "记录核对并解除屏障（不重试）"; button.disabled = true;
+          const status = document.createElement("p"); status.setAttribute("role", "status");
+          const validate = () => {{ button.disabled = !checks.every(c => c.checked) || !note.value.trim(); }};
+          checks.forEach(c => c.addEventListener("change", validate)); note.addEventListener("input", validate);
+          button.addEventListener("click", async () => {{
+            if (!current(ctx) || button.disabled) return;
+            button.disabled = true;
+            try {{
+              const result = await fetch("/api/chat/write-recovery/acknowledge", {{method: "POST", headers: {{...headers(ctx), "Content-Type": "application/json"}}, body: JSON.stringify({{chat_id: ctx.chatId, execution_id: row.id, confirmed_reviewed: checks[0].checked, execution_stopped: checks[1].checked, note: note.value.trim()}})}});
+              const payload = await result.json();
+              if (!current(ctx)) return;
+              if (!result.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "确认未完成，请核对后重试。");
+              appendMessage("system", payload.message);
+              await loadWriteRecovery(ctx);
+            }} catch (error) {{ if (current(ctx)) {{ status.textContent = error.message; validate(); }} }}
+          }});
+          section.appendChild(button); section.appendChild(status); list.appendChild(section);
+        }}
+      }} catch (error) {{
+        if (current(ctx) && !panel.hidden) {{ list.textContent = error.message; }}
+      }}
+    }}
+    document.getElementById("refresh-write-recovery").addEventListener("click", () => {{ if (active) loadWriteRecovery(active); }});
     function replyKey(snapshot) {{
       return snapshot.run_id + ":" + (snapshot.status === "waiting_input" ? "input:" + snapshot.sequence : "final");
     }}
@@ -411,7 +619,8 @@ def _build_chat_page_html(
       const key = replyKey(snapshot);
       if (ctx.delivered.has(key)) return;
       ctx.delivered.add(key);
-      appendMessage("assistant", reply);
+      loadWriteRecovery(ctx);
+      if (!finishInline(ctx, reply, snapshot.status, snapshot.response_model)) appendMessage("assistant", reply, [], false, !["failed", "cancelled"].includes(snapshot.status), snapshot);
     }}
 
     function clearAcceptedDraft(ctx, pending) {{
@@ -478,16 +687,17 @@ def _build_chat_page_html(
       ctx.snapshot = snapshot;
       ctx.syncing = false;
       if (ACTIVE.has(snapshot.status) && [180000, 600000].includes(snapshot.wall_time_ms)) {{
-        modeInput.value = snapshot.wall_time_ms === 180000 ? "standard" : "analysis";
+        modeInput.value = pending?.mode === "prepare" ? "prepare" : snapshot.wall_time_ms === 180000 ? "standard" : "analysis";
       }}
 
       if (withHistory && !ctx.historyLoaded) {{
         ctx.historyLoaded = true;
-        messagesEl.replaceChildren();
+        window.XClawOpenUIHost?.clear();
+      messagesEl.replaceChildren();
         const history = (snapshot.messages || []).filter(item => ["user", "assistant"].includes(item.role) && typeof item.content === "string");
-        history.forEach(item => appendMessage(item.role, item.content));
-        const lastItem = messagesEl.lastElementChild;
-        if (lastItem) messagesEl.scrollTop = Math.max(0, lastItem.offsetTop - messagesEl.offsetTop - 24);
+        ctx.historyFailed = history.at(-1)?.role === "assistant" && history.at(-1)?.status === "failed";
+        history.forEach(item => {{ if (item.status === "failed") appendMessage(item.role, item.content, [], true, false); else appendMessage(item.role, item.content, [], true, true, item); }});
+        followMessages(true);
         const last = history.at(-1);
         if (last?.role === "assistant" && (!last.run_id || last.run_id === snapshot.run_id)
             && snapshot.reply && last.content === snapshot.reply) {{
@@ -495,10 +705,10 @@ def _build_chat_page_html(
         }}
       }}
 
-      setStatus(STATUS_LABELS[snapshot.status]);
+      setStatus(snapshot.status === "idle" && ctx.historyFailed ? "上次任务未完成" : STATUS_LABELS[snapshot.status], snapshot.status === "failed" || (snapshot.status === "idle" && ctx.historyFailed));
       stageEl.textContent = ({{idle:"准备就绪",queued:"已接收",model:"分析中",tool:"查询中",finalizing:"整理结论",waiting_input:"待补充",completed:"已完成",failed:"未完成",cancelled:"已取消",cancelling:"取消中",reconnecting:"正在重新连接"}})[snapshot.stage] || STATUS_LABELS[snapshot.status];
       progressMessageEl.textContent = snapshot.message || STATUS_LABELS[snapshot.status];
-      const budget = snapshot.wall_time_ms || (pending?.mode === "standard" || modeInput.value === "standard" ? 180000 : 600000);
+      const budget = snapshot.wall_time_ms || (["standard","prepare"].includes(pending?.mode || modeInput.value) ? 180000 : 600000);
       timeEl.textContent = (snapshot.elapsed_seconds == null ? "耗时未记录" : "已耗时 " + Math.floor(snapshot.elapsed_seconds) + " 秒") + " / 预算 " + (budget / 60000) + " 分钟";
 
       const ended = TERMINAL.has(snapshot.status) || (snapshot.status === "waiting_input"
@@ -513,6 +723,7 @@ def _build_chat_page_html(
         if (TERMINAL.has(snapshot.status)) ctx.finishedRuns.add(snapshot.run_id);
       }}
       controls(ctx);
+      syncPresentationStatus(ctx);
       // Terminal state and persisted reply can become visible on adjacent reads.
       if (snapshot.status === "completed" && !snapshot.reply) {{
         ctx.replyAttempts = (ctx.replyAttempts || 0) + 1;
@@ -523,7 +734,179 @@ def _build_chat_page_html(
       return !ended && snapshot.status !== "idle";
     }}
 
+    function clearStreamDiagnostic(ctx) {{
+      ctx.streamDiagnostic?.panel.remove();
+      ctx.streamDiagnostic = null;
+    }}
+    function recordStreamDiagnostic(ctx, kind, event = {{}}) {{
+      if (!current(ctx)) return;
+      if (new URLSearchParams(window.location?.search || "").get("stream_diagnostics") !== "1") return;
+      const requestId = ctx.pending?.requestId;
+      if (!ctx.streamDiagnostic || ctx.streamDiagnostic.requestId !== requestId) {{
+        clearStreamDiagnostic(ctx);
+        const panel=document.createElement("details"), summary=document.createElement("summary"), rows=document.createElement("pre");
+        summary.textContent="流式观察记录（本地指标，非精确屏幕绘制时间）";
+        panel.appendChild(summary);panel.appendChild(rows);messagesEl.insertAdjacentElement("afterend",panel);
+        ctx.streamDiagnostic={{requestId,panel,rows,start:performance.now(),lines:[]}};
+      }}
+      const diagnostic=ctx.streamDiagnostic, bubble=ctx.liveBubble;
+      const metadata={{seq:event.seq ?? "-",round:event.round ?? "-",chars:typeof event.text === "string" ? event.text.length : 0}};
+      requestAnimationFrame(() => requestAnimationFrame(() => {{
+        if (!current(ctx) || ctx.streamDiagnostic !== diagnostic) return;
+        const box=bubble?.isConnected ? bubble.getBoundingClientRect() : null, viewport=messagesEl.getBoundingClientRect();
+        const intersects=Boolean(box && box.bottom>Math.max(0,viewport.top) && box.top<Math.min(window.innerHeight,viewport.bottom)
+          && box.right>Math.max(0,viewport.left) && box.left<Math.min(window.innerWidth,viewport.right));
+        const elapsed=Math.round(performance.now()-diagnostic.start);
+        diagnostic.lines.push(`${{elapsed}}ms ${{kind}} seq=${{metadata.seq}} round=${{metadata.round}} chars=${{metadata.chars}} visibility=${{document.visibilityState}} intersects=${{intersects}}`);
+        if(diagnostic.lines.length>300)diagnostic.lines.shift();
+        diagnostic.rows.textContent=diagnostic.lines.join("\\n");
+      }}));
+    }}
+
+    function onStreamDiagnosticEvent(event) {{
+      if (new URLSearchParams(window.location?.search || "").get("stream_diagnostics") !== "1" || !active) return;
+      const phase=event.detail?.phase, tool=event.detail?.tool;
+      if (phase === "card-data-visible") {{
+        const {{cardType,documentVisible,inViewport}} = event.detail;
+        if (typeof cardType !== "string" || !/^[a-zA-Z][a-zA-Z0-9_]{{0,63}}$/.test(cardType)
+            || typeof documentVisible !== "boolean" || typeof inViewport !== "boolean") return;
+        recordStreamDiagnostic(active,phase+" card="+cardType+" documentVisible="+documentVisible+" inViewport="+inViewport);
+        return;
+      }}
+      if (!["query-start","query-end","provider-ready"].includes(phase)) return;
+      if (tool !== undefined && (typeof tool !== "string" || !/^[a-zA-Z][a-zA-Z0-9_]{{0,63}}$/.test(tool))) return;
+      // Only whitelisted metadata is copied; never serialize arbitrary detail.
+      recordStreamDiagnostic(active,phase+(tool ? " tool="+tool : ""));
+    }}
+    window.addEventListener("xclaw-stream-diagnostic",onStreamDiagnosticEvent);
+
+    function finishInline(ctx, reply, status, responseModel) {{
+      if (!ctx.inlinePresentation || !ctx.liveBubble) return false;
+      if (ctx.inlineFinishing) return true;
+      ctx.inlineFinishing = true;
+      const bubble=ctx.liveBubble, requestId=ctx.liveRequestId;
+      if (status === "completed" && typeof responseModel === "string" && responseModel) bubble.setAttribute("data-model", responseModel);
+      void (async()=>{{
+        try {{
+          if (status !== "completed") throw new Error("unfinished");
+          let presentation=ctx.inlinePresentation;
+          const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(reply));
+          const replyHash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+          if(presentation.reply_hash!==undefined&&presentation.reply_hash!==replyHash)throw new Error("reply_hash_mismatch");
+          presentation={{...presentation,reply_hash:replyHash}};
+          if (!presentation.validated || presentation.provisional) {{
+            const response=await fetch('/api/openui/presentation',{{method:'POST',headers:headers(ctx),body:JSON.stringify({{chat_id:ctx.chatId,reply_hash:replyHash,...(presentation.presentation_id?{{presentation_id:presentation.presentation_id}}:{{}})}})}});
+            if(!response.ok)throw new Error("presentation_unavailable");
+            const saved=await response.json(), source=JSON.parse(saved.source);
+            if(source.version!=="xclaw-narrative-1"||!Array.isArray(source.blocks))throw new Error("invalid_presentation");
+            if(presentation.presentation_id && (saved.presentation_id!==presentation.presentation_id||source.presentation_id!==presentation.presentation_id))throw new Error("presentation_identity_mismatch");
+            presentation={{...presentation,blocks:source.blocks,provisional:false,validated:true,reply_hash:replyHash,message_id:saved.message_id}};
+          }}
+          if(!current(ctx)||ctx.liveRequestId!==requestId)return;
+          if(presentation.blocks.filter(b=>b.type==='text').map(b=>b.source).join("\\n\\n")!==reply)throw new Error("changed_prose");
+          if(!window.XClawOpenUIHost.updateLive(bubble,presentation,{{chatId:ctx.chatId,runId:requestId,getToken:()=>ctx.token,isCurrent:()=>current(ctx)}}))throw new Error("invalid_presentation");
+          bubble.classList.remove('streaming');ctx.liveLabel?.remove();ctx.liveNote?.remove();
+          recordStreamDiagnostic(ctx,"inline-committed");
+        }} catch (_) {{
+          if(current(ctx)&&ctx.liveRequestId===requestId){{
+            window.XClawOpenUIHost?.failLive?.(bubble);
+            if(ctx.liveLabel)ctx.liveLabel.textContent="本次生成未完成";
+            if(status==='completed'){{
+              window.XClawOpenUIHost?.disposeLive?.(bubble);
+              bubble.classList.remove('streaming');bubble.replaceChildren();const text=document.createElement('div');text.className='markdown';text.innerHTML=window.renderChatMarkdown(reply);bubble.appendChild(text);
+              const note=document.createElement('p');note.textContent='图表未通过最终校验，已保留完整文字答复。';bubble.appendChild(note);
+            }}
+          }}
+        }} finally {{
+          if(ctx.liveBubble===bubble){{ctx.liveController?.abort();ctx.liveController=null;ctx.liveBubble=null;ctx.inlinePresentation=null;ctx.inlineFinishing=false;}}
+        }}
+      }})();
+      return true;
+    }}
+    function clearLiveText(ctx) {{
+      ctx.liveController?.abort(); ctx.liveController = null;
+      if(ctx.liveBubble)window.XClawOpenUIHost?.disposeLive?.(ctx.liveBubble);
+      ctx.liveBubble?.remove(); ctx.liveBubble = null;ctx.inlinePresentation=null;ctx.inlineFinishing=false;
+    }}
+    async function observeLiveText(ctx) {{
+      if (ctx.liveController || !ctx.pending || ctx.pending.settled) return;
+      const requestId = ctx.pending.requestId;
+      if (ctx.liveRequestId !== requestId) {{ ctx.liveRequestId = requestId; ctx.liveSeq = -1; }}
+      const controller = new AbortController(); ctx.liveController = controller;
+      try {{
+        const query = new URLSearchParams({{chat_id:ctx.chatId}});
+        const response = await fetch('/api/chat/receipts/'+requestId+'/events?'+query, {{headers:headers(ctx),signal:controller.signal,cache:'no-store'}});
+        if (!response.ok || !response.body) return;
+        const reader=response.body.getReader(), decoder=new TextDecoder(); let buffer='';
+        while (true) {{
+          const part=await reader.read(); if(part.done) break;
+          buffer+=decoder.decode(part.value,{{stream:true}}).replace(/\\r/g,'');
+          let end;
+          while ((end=buffer.indexOf('\\n\\n'))>=0) {{
+            const frame=buffer.slice(0,end);buffer=buffer.slice(end+2);
+            const line=frame.split('\\n').find(x=>x.startsWith('data:'));
+            if(!line)continue;
+            const event=JSON.parse(line.slice(5));
+            if(!current(ctx)||ctx.liveController!==controller||ctx.pending?.requestId!==requestId||ctx.pending.settled) return;
+            if(!Number.isInteger(event.seq)||event.seq<ctx.liveSeq)continue;
+            ctx.liveSeq=event.seq;
+            if(event.presentation && SUPPORTS_OPENUI) {{
+              ctx.inlinePresentation={{...event.presentation,...(event.reply_hash?{{reply_hash:event.reply_hash}}:{{}})}};
+            }}
+            if(event.draft_failed && ctx.liveBubble) {{
+              const shown=(ctx.inlinePresentation?.blocks || []).filter(b=>b.type==='text').map(b=>b.source).join("\\n\\n");
+              const accepted=window.XClawOpenUIHost?.failLive?.(ctx.liveBubble,event.text);
+              if(!accepted && typeof event.text==='string' && event.text.startsWith(shown)){{
+                window.XClawOpenUIHost?.disposeLive?.(ctx.liveBubble);
+                ctx.liveContent.hidden=false;
+                ctx.liveContent.innerHTML=window.renderChatMarkdown(event.text);
+              }}
+              ctx.liveLabel.textContent="本次生成未完成，以下为已收到的文字";
+              if(event.terminal)return;
+              continue;
+            }}
+            if(!event.text && ctx.inlinePresentation) {{if(event.terminal)return;continue;}}
+            if(!event.text) {{
+              ctx.liveBubble?.remove();ctx.liveBubble=null;ctx.liveLabel=null;
+              if(event.terminal)return;
+              continue;
+            }}
+            if(!ctx.liveBubble){{
+              ctx.liveBubble=document.createElement('article');ctx.liveBubble.className='message assistant streaming';
+              const label=document.createElement('div');label.textContent='正在生成…';ctx.liveLabel=label;
+              ctx.liveContent=document.createElement('div');ctx.liveContent.className='markdown';
+              ctx.liveNote=document.createElement('div');
+              ctx.liveBubble.appendChild(label);ctx.liveBubble.appendChild(ctx.liveContent);ctx.liveBubble.appendChild(ctx.liveNote);
+              messagesEl.appendChild(ctx.liveBubble);
+            }}
+            // Use the same html:false parser as final replies; never attach OpenUI
+            // or synthesize closing Markdown delimiters for partial provider text.
+            if(event.presentation && window.XClawOpenUIHost?.updateLive) {{
+              ctx.liveContent.hidden=true;
+              const accepted=window.XClawOpenUIHost.updateLive(ctx.liveBubble,ctx.inlinePresentation,{{chatId:ctx.chatId,runId:requestId,getToken:()=>ctx.token,isCurrent:()=>current(ctx)}});
+              if(!accepted)window.XClawOpenUIHost.failLive(ctx.liveBubble);
+            }} else if(!ctx.inlinePresentation && window.renderChatMarkdown)ctx.liveContent.innerHTML=window.renderChatMarkdown(event.text);
+            else ctx.liveContent.textContent=event.text;
+            ctx.liveNote.textContent=event.truncated?'实时预览已达上限，完整答复稍后显示':'';
+            recordStreamDiagnostic(ctx,"snapshot",event);
+            followMessages();
+            if(event.terminal) {{
+              // The final snapshot may coalesce the last provider deltas. Render
+              // its draft first; only the durable receipt can declare success.
+              ctx.liveLabel.textContent='正在确认结果…';
+              return;
+            }}
+          }}
+        }}
+        if(ctx.inlinePresentation&&ctx.liveBubble&&!ctx.inlineFinishing){{window.XClawOpenUIHost?.failLive?.(ctx.liveBubble);ctx.liveLabel.textContent="连接已中断，等待最终回执";}}
+      }} catch (_) {{ if(ctx.inlinePresentation&&ctx.liveBubble){{window.XClawOpenUIHost?.failLive?.(ctx.liveBubble);ctx.liveLabel.textContent="连接已中断，等待最终回执";}} /* Receipt polling remains authoritative; never re-POST. */ }}
+      finally {{if(ctx.liveController===controller)ctx.liveController=null;}}
+    }}
+
     function applyReceipt(ctx, result) {{
+      if (!ctx.pending || result.request_id !== ctx.pending.requestId) throw new Error("receipt_mismatch");
+      if (["completed", "failed", "interrupted"].includes(result.status)) {{ if(!ctx.inlinePresentation)clearLiveText(ctx); loadWriteRecovery(ctx); }}
+      else if (result.status === "processing") observeLiveText(ctx);
       const pending = ctx.pending;
       if (!pending || result.request_id !== pending.requestId) throw new Error("receipt_mismatch");
       ctx.syncing = false;
@@ -554,26 +937,30 @@ def _build_chat_page_html(
             const last = messagesEl.lastElementChild;
             if (!(pending.restored && last?.className === "message assistant"
                 && last.textContent.trim() === result.reply?.trim())) {{
-              appendMessage("assistant", result.reply || "请求已结束，但没有可展示的回复。");
+              if(!finishInline(ctx,result.reply || "",result.status,result.response_model)) appendMessage("assistant", result.reply || "请求已结束，但没有可展示的回复。", [], false, result.status === "completed", result);
             }}
             pending.replyRendered = true;
+
           }}
+          if (!pending.finalDiagnosticRecorded) {{ recordStreamDiagnostic(ctx,"final-replaced");pending.finalDiagnosticRecorded=true; }}
           if (result.status === "completed") clearAcceptedDraft(ctx, pending);
           else saveDraft(ctx);
           if (!result.progress) {{
             setStatus(result.status === "completed" ? "响应完成" : "任务未完成");
             stageEl.textContent = result.status === "completed" ? "已处理" : "未完成";
             timeEl.textContent = "";
-            progressMessageEl.textContent = "已按提交回执确认结果。";
+            progressMessageEl.textContent = result.status === "completed" ? "已按提交回执确认结果。" : "本次请求未完成，草稿已保留；不会自动重发已执行的工具。";
           }}
         }} else {{
           pending.settled = false;
           if (!result.progress || TERMINAL.has(result.progress.status)) {{
-            setStatus("请求已接收");
-            stageEl.textContent = "确认执行结果";
+            setStatus(result.message || "请求已接收");
+            stageEl.textContent = result.message || "确认执行结果";
+            timeEl.textContent = Number.isFinite(result.elapsed_seconds) ? "已耗时 " + Math.floor(result.elapsed_seconds) + " 秒" : "";
             progressMessageEl.textContent = result.message || "正在等待原任务的持久化回复，不会重新执行。";
           }}
         }}
+        syncPresentationStatus(ctx);
         controls(ctx);
         return !done;
       }} else throw new Error("invalid_receipt");
@@ -650,9 +1037,49 @@ def _build_chat_page_html(
       void pollProgress(ctx, ctx.epoch);
     }}
 
+    async function loadModels(ctx, preferred) {{
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {{
+        const response = await fetch("/api/chat/models", {{headers: headers(ctx), signal: controller.signal, cache: "no-store"}});
+        if (!response.ok) throw new Error("models_unavailable");
+        const data = await response.json();
+        if (!current(ctx)) return;
+        if (!Array.isArray(data.model_options) || !data.model_options.length
+            || data.model_options.some(id => typeof id !== "string" || !id)
+            || !data.model_options.includes(data.default_model)) throw new Error("invalid_models");
+        ctx.modelOptions = [...new Set(data.model_options)];
+        modelInput.replaceChildren();
+        for (const id of ctx.modelOptions) {{
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = (id.startsWith("codex/") ? id.slice(6) : id) + (id === data.default_model ? " · 默认" : "");
+          modelInput.appendChild(option);
+        }}
+        // Preserve a removed selection visibly, never silently substitute another model.
+        if (preferred && !ctx.modelOptions.includes(preferred)) {{
+          const unavailable = document.createElement("option");
+          unavailable.value = preferred;
+          unavailable.textContent = preferred + " · 不可用，请重新选择";
+          modelInput.appendChild(unavailable);
+        }}
+        modelInput.value = preferred || data.default_model;
+        ctx.modelsReady = true;
+      }} catch (_error) {{
+        if (!current(ctx)) return;
+        ctx.modelsReady = false;
+        modelInput.replaceChildren();
+        const option = document.createElement("option");
+        option.textContent = "模型列表不可用，请检查 Token 或刷新";
+        option.value = "";
+        modelInput.appendChild(option);
+      }} finally {{ clearTimeout(timeout); if (current(ctx)) controls(ctx); }}
+    }}
+
     async function openChat() {{
       if (active) {{
         saveDraft(active);
+        clearStreamDiagnostic(active);
         stopObservation(active);
         active.cancelController?.abort();
       }}
@@ -663,15 +1090,21 @@ def _build_chat_page_html(
         delivered: new Set(), finishedRuns: new Set(), historyLoaded: false, syncing: true, cancelling: false
       }};
       active = ctx;
+      document.getElementById("write-recovery").hidden = true;
+      loadWriteRecovery(ctx);
       controls(ctx);
+      window.XClawOpenUIHost?.clear();
+      direction = 0; intentUntil = 0; draggingBar = false; lastTop = 0;
+      followMessages(true);
       messagesEl.replaceChildren();
       renderFiles([]);
       messageInput.value = "";
       messageInput.disabled = true;
-      modeInput.value = "analysis";
+      modeInput.value = DEFAULT_EXECUTION_MODE;
+      modelInput.value = "";
       stageEl.textContent = "尚未开始任务";
       progressMessageEl.textContent = "正在查询会话，不会重发消息。";
-      timeEl.textContent = "已耗时 0 秒 / 预算 10 分钟";
+      timeEl.textContent = SUPPORTS_PROGRESS ? "已耗时 0 秒 / 预算 10 分钟" : "";
       resumeBtn.hidden = true;
       stored(localStorage, STORAGE_KEYS.chatId, chatId);
       stored(localStorage, STORAGE_KEYS.token, token);
@@ -688,7 +1121,7 @@ def _build_chat_page_html(
       messageInput.value = saved?.text || "";
       messageInput.disabled = false;
       ctx.draftReady = true;
-      modeInput.value = saved?.mode === "standard" ? "standard" : "analysis";
+      modeInput.value = (["standard", "analysis"].includes(saved?.mode) || SUPPORTS_PREPARE && saved?.mode === "prepare") ? saved.mode : DEFAULT_EXECUTION_MODE;
       renderFiles(saved?.files || []);
       let receipt = saved?.receipt;
       if (!receipt && SUPPORTS_RECEIPTS && ctx.draftKey) {{
@@ -697,6 +1130,28 @@ def _build_chat_page_html(
       if (SUPPORTS_RECEIPTS && /^[a-f0-9]{{32}}$/.test(receipt?.requestId || "")) {{
         ctx.pending = {{...receipt, files: saved?.requestFiles || [], restored: true, settled: false}};
       }}
+      await loadModels(ctx, ctx.pending?.model || saved?.model);
+      if (!current(ctx)) return;
+      if (!SUPPORTS_PROGRESS && SUPPORTS_RECEIPTS && chatId && (!AUTH_REQUIRED || token)) {{
+        const historyController = new AbortController();
+        const historyTimeout = setTimeout(() => historyController.abort(), 10000);
+        try {{
+          setStatus("正在恢复会话历史");
+          const response = await fetch("/api/chat/history?" + new URLSearchParams({{chat_id: chatId}}),
+            {{headers: token ? {{Authorization: "Bearer " + token}} : {{}}, signal: historyController.signal}});
+          if (!response.ok) throw new Error("history_unavailable");
+          const result = await response.json();
+          if (!current(ctx)) return;
+          const history = (result.messages || []).filter(item => ["user", "assistant"].includes(item.role) && typeof item.content === "string");
+          ctx.historyFailed = history.at(-1)?.role === "assistant" && history.at(-1)?.status === "failed";
+        history.forEach(item => {{ if (item.status === "failed") appendMessage(item.role, item.content, [], true, false); else appendMessage(item.role, item.content, [], true, true, item); }});
+          ctx.historyLoaded = true;
+        }} catch (_error) {{
+          if (!current(ctx)) return;
+          appendMessage("system", "历史消息暂时无法恢复，请重新连接；不会自动重发任何问题。");
+        }} finally {{ clearTimeout(historyTimeout); }}
+      }}
+      if (!current(ctx)) return;
       ctx.syncing = SUPPORTS_PROGRESS || Boolean(ctx.pending);
       controls(ctx);
       if ((SUPPORTS_PROGRESS || ctx.pending) && chatId && (!AUTH_REQUIRED || token)) {{
@@ -705,8 +1160,8 @@ def _build_chat_page_html(
       }} else {{
         ctx.syncing = false;
         controls(ctx);
-        setStatus(AUTH_REQUIRED && !token ? "需要 Bearer Token" : "准备就绪");
-        appendMessage("system", SUPPORTS_PROGRESS ? "填好会话 ID 和 Token 后重新连接。" : "页面已就绪，可以开始聊天。");
+        setStatus(AUTH_REQUIRED && !token ? "需要 Bearer Token" : ctx.historyFailed ? "上次任务未完成" : "准备就绪", Boolean(ctx.historyFailed));
+        if (!messagesEl.children.length) appendMessage("system", SUPPORTS_PROGRESS ? "填好会话 ID 和 Token 后重新连接。" : "页面已就绪，可以开始聊天。");
       }}
     }}
 
@@ -717,12 +1172,17 @@ def _build_chat_page_html(
       if (!message) {{ setStatus("先输入消息或选择图片"); return; }}
       if (!ctx.chatId) {{ setStatus("先填会话 ID"); return; }}
       if (AUTH_REQUIRED && !ctx.token) {{ setStatus("需要 Bearer Token"); return; }}
+      ctx.historyFailed = false;
       const prior = ctx.pending;
       const pending = {{
-        message, draftText: messageInput.value, files: [...selectedFiles], mode: modeInput.value,
+        message, draftText: messageInput.value, files: [...selectedFiles], mode: modeInput.value, model: modelInput.value,
         baseRunId: ctx.snapshot?.run_id, baseSequence: ctx.snapshot?.sequence || 0,
         continuing: ctx.snapshot?.status === "waiting_input", runId: null, settled: false
       }};
+      // Legacy receipts were fingerprinted before model selection existed.
+      // Omit model only when retrying that same unresolved ID; the full original
+      // payload fingerprint below still rejects altered content, images or mode.
+      if (prior?.requestId && !prior.receiptFinished && !prior.model) pending.model = undefined;
       ctx.pending = pending;
       saveDraft(ctx);
       controls(ctx);
@@ -734,8 +1194,8 @@ def _build_chat_page_html(
       try {{
         const attachments = await Promise.all(pending.files.map(readImage));
         if (!current(ctx) || ctx.pending !== pending) return;
-        const payload = {{chat_id: ctx.chatId, message, attachments}};
-        if (SUPPORTS_PROGRESS) payload.execution_mode = pending.mode;
+        const payload = {{chat_id: ctx.chatId, message, attachments, model: pending.model}};
+        if (SUPPORTS_PROGRESS || SUPPORTS_PREPARE) payload.execution_mode = pending.mode;
         if (SUPPORTS_RECEIPTS) {{
           const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(payload)));
           if (!current(ctx) || ctx.pending !== pending) return;
@@ -743,7 +1203,7 @@ def _build_chat_page_html(
           if (prior?.requestId && !prior.receiptFinished && prior.fingerprint !== pending.fingerprint) {{
             ctx.pending = prior;
             setStatus("请先核对原提交");
-            progressMessageEl.textContent = "仍有未确认的提交。重试须保持原文字、模式和图片；如要开始新请求，请先在设置中结束本次提交核对。";
+            progressMessageEl.textContent = "仍有未确认的提交。重试须保持原文字、模型、模式和图片；如要开始新请求，请先在设置中结束本次提交核对。";
             saveDraft(ctx);
             controls(ctx);
             return;
@@ -767,9 +1227,12 @@ def _build_chat_page_html(
         if (!response.ok) {{
           if (pending.settled) return;
           pending.httpError = true;
+          let rejection = "";
+          try {{ const problem = await response.json(); if (["model_unavailable", "model_not_allowed"].includes(problem.detail?.code)) rejection = "所选模型不可用，未自动切换模型"; }} catch (_error) {{}}
+          if (!current(ctx) || ctx.pending !== pending) return;
           if (!SUPPORTS_PROGRESS || (response.status < 500 && !pending.runId)) {{
             stopObservation(ctx);
-            failSubmission(ctx, pending, response.status === 401 ? "鉴权失败，请检查 Token。草稿和图片已保留。" : "发送失败，请检查消息或图片后手动重试。草稿和图片已保留。");
+            failSubmission(ctx, pending, response.status === 401 ? "鉴权失败，请检查 Token。草稿和图片已保留。" : (rejection ? "发送失败：" + rejection + "。草稿和图片已保留。" : "发送失败，请检查消息或图片后手动重试。草稿和图片已保留。"));
           }} else {{
             progressMessageEl.textContent = "消息处理失败，正在核对任务状态。草稿和图片已保留。";
             observe(ctx);
@@ -783,6 +1246,15 @@ def _build_chat_page_html(
         if (pending.requestId) {{
           if (data.request_id !== pending.requestId || data.status !== "accepted") throw new Error("invalid_receipt_ack");
           observe(ctx);
+        }} else if (data.status === "failed") {{
+          stopObservation(ctx);
+          pending.settled = true;
+          appendMessage("assistant", pending.httpReply, [], false, false);
+          saveDraft(ctx);
+          setStatus("任务未完成");
+          stageEl.textContent = "未完成";
+          progressMessageEl.textContent = "本次请求未完成，草稿已保留；不会自动重发已执行的工具。";
+          controls(ctx);
         }} else if (SUPPORTS_PROGRESS && data.delivery === "direct" && typeof data.reply === "string" && data.reply.trim()) {{
           // Local operations complete without a Run. Invalidate pre-operation polls,
           // then refresh the baseline before accepting another submission.
@@ -866,14 +1338,16 @@ def _build_chat_page_html(
     }});
     clearImagesBtn.addEventListener("click", () => {{ renderFiles([]); saveDraft(); }});
     messageInput.addEventListener("input", () => saveDraft());
+    modelInput.addEventListener("change", () => {{ saveDraft(); if (active) controls(active); }});
     modeInput.addEventListener("change", () => {{
       saveDraft();
-      timeEl.textContent = "已耗时 0 秒 / 预算 " + (modeInput.value === "standard" ? 3 : 10) + " 分钟";
+      timeEl.textContent = "已耗时 0 秒 / 预算 " + (["standard","prepare"].includes(modeInput.value) ? 3 : 10) + " 分钟";
     }});
     sendBtn.addEventListener("click", sendMessage);
     cancelBtn.addEventListener("click", cancelRun);
     resumeBtn.addEventListener("click", () => observe(active));
     document.getElementById("clear-btn").addEventListener("click", () => {{
+      window.XClawOpenUIHost?.clear();
       messagesEl.replaceChildren();
       appendMessage("system", "消息区已清空，不会取消任务或删除服务端历史。");
     }});
@@ -893,7 +1367,7 @@ def _build_chat_page_html(
       }}
     }});
     window.addEventListener("online", () => {{ if (SUPPORTS_PROGRESS && active) observe(active); }});
-    window.addEventListener("pagehide", () => {{ saveDraft(); if (active) stopObservation(active); }});
+    window.addEventListener("pagehide", () => {{ saveDraft(); if (active) {{clearStreamDiagnostic(active);stopObservation(active);}} }});
     window.addEventListener("keydown", event => {{
       if (event.key === "Escape") document.getElementById("chat-settings").open = false;
     }});
@@ -1105,6 +1579,8 @@ def create_web_app(
     cancel_handler: Callable[..., Coroutine[Any, Any, dict]] | None = None,
     startup_handler: Callable[[], Coroutine[Any, Any, None]] | None = None,
     readiness_handler: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    openui_service: Any = None,
+    receipt_progress_handler: Callable[..., Coroutine[Any, Any, dict | None]] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all XClaw web routes.
 
@@ -1192,11 +1668,17 @@ def create_web_app(
         ns = _user_namespace(token)
         return f"web_{ns}_{req_chat_id}"
 
+    supports_prepare = bool(openui_service is not None and getattr(settings, "agent_backend", None) == "native" and getattr(settings, "openui_inline_stream", False))
+
+    if openui_service is not None:
+        from xclaw.openui import create_openui_router
+        app.include_router(create_openui_router(openui_service, verify_token, _effective_chat_id))
+
     # ── Routes ────────────────────────────────────────────────────────────────
 
     @app.get("/chat-assets/{name}", include_in_schema=False)
     async def chat_asset(name: str) -> FileResponse:
-        if name not in {"chat.css", "markdown-it.min.js", "markdown.js"}:
+        if name not in {"chat.css", "markdown-it.min.js", "markdown.js", "openui.js", "openui.css", "openui-host.js"}:
             raise HTTPException(status_code=404)
         return FileResponse(
             Path(__file__).with_name("static") / name,
@@ -1215,6 +1697,8 @@ def create_web_app(
                 supports_images=supports_images,
                 supports_progress=progress_handler is not None,
                 supports_receipts=receipts is not None,
+                supports_openui=openui_service is not None,
+                supports_prepare=supports_prepare,
             )
         )
 
@@ -1238,13 +1722,77 @@ def create_web_app(
         except Exception:
             return JSONResponse({"status": "unavailable"}, status_code=503)
 
+    from xclaw.model_routing import configured_models, resolve_request_model
+
+    @app.get("/api/chat/models", dependencies=[Depends(verify_token)])
+    async def chat_models():
+        models = configured_models(settings)
+        return JSONResponse({"model_options": models, "default_model": models[0] if models else None},
+                            headers={"Cache-Control": "no-store"})
+
+    def selected_model(req):
+        if req.model is None and not configured_models(settings):
+            return None
+        try:
+            return resolve_request_model(settings, req.model)
+        except ValueError:
+            raise HTTPException(400, detail={"code": "model_not_allowed"}) from None
+
+    async def invoke_message(effective_id, message, options):
+        baseline = None
+        if isinstance(getattr(db, "_path", None), Path):
+            async with db.conn.execute("SELECT COALESCE(MAX(m.id),0) FROM messages m JOIN chats c ON c.id=m.chat_id WHERE c.channel='web' AND c.external_chat_id=?", (effective_id,)) as cursor:
+                baseline = (await cursor.fetchone())[0]
+        reply = await message_handler(effective_id, message, **options)
+        if isinstance(reply, RejectedReply) and baseline is not None:
+            # Persist trusted outcome against the actual message row, not failure-word heuristics.
+            # Dedicated connection does not commit unrelated application transactions.
+            import aiosqlite
+            try:
+                async with aiosqlite.connect(str(db._path)) as conn:
+                    await conn.execute("CREATE TABLE IF NOT EXISTS web_message_outcomes (message_id INTEGER PRIMARY KEY, status TEXT NOT NULL)")
+                    message_id = getattr(reply, "message_id", None)
+                    internal_chat_id = getattr(reply, "chat_id", None)
+                    candidates = []
+                    if message_id is not None or internal_chat_id is not None:
+                        # Server-issued identity is authoritative. Invalid metadata MUST NOT
+                        # fall back to matching an unrelated row with the same failure text.
+                        if type(message_id) is int and type(internal_chat_id) is int:
+                            async with conn.execute(
+                                "SELECT m.id FROM messages m JOIN chats c ON c.id=m.chat_id "
+                                "WHERE m.id=? AND m.chat_id=? AND c.channel='web' "
+                                "AND c.external_chat_id=? AND m.role='assistant' AND m.content=?",
+                                (message_id, internal_chat_id, effective_id, str(reply)),
+                            ) as cursor:
+                                candidates = await cursor.fetchall()
+                    else:
+                        # Compatibility for external handlers without message metadata only.
+                        # Unique post-call matching is conservative, not concurrent-safe identity.
+                        async with conn.execute(
+                            "SELECT m.id FROM messages m JOIN chats c ON c.id=m.chat_id "
+                            "WHERE c.channel='web' AND c.external_chat_id=? AND m.role='assistant' AND m.content=? AND m.id>?",
+                            (effective_id, str(reply), baseline),
+                        ) as cursor:
+                            candidates = await cursor.fetchall()
+                    if len(candidates) == 1:
+                        await conn.execute("INSERT OR REPLACE INTO web_message_outcomes VALUES(?,'failed')", (candidates[0][0],))
+                    await conn.commit()
+            except Exception:
+                logger.warning("Failed reply history metadata could not be persisted")
+        return reply
+
     @app.post("/api/chat", response_model=ChatResponse, response_model_exclude_none=True, dependencies=[Depends(verify_token)])
     async def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
         """Non-streaming chat endpoint."""
+        if req.execution_mode == "prepare" and not supports_prepare:
+            raise HTTPException(status_code=400, detail="当前实例不支持预览操作模式")
         effective_id = _effective_chat_id(req.chat_id, authorization)
         if req.attachments and not supports_images:
             raise HTTPException(status_code=400, detail="当前执行后端未启用图片输入")
         options = {"attachments": req.attachments} if req.attachments else {}
+        chosen = selected_model(req)
+        if req.model is not None or getattr(settings, "web_model_options", None):
+            options["model"] = chosen
         if req.execution_mode is not None:
             options["execution_mode"] = req.execution_mode
 
@@ -1254,13 +1802,15 @@ def create_web_app(
             scope = receipts.scope(effective_id, _extract_token(authorization))
             try:
                 receipt, created = await receipts.admit(
-                    scope, req.request_id, req.model_dump(exclude={"request_id"}),
+                    scope, req.request_id, {**req.model_dump(exclude={"request_id", "model"}),
+                                            **({"model": chosen} if chosen else {})},
+                    allow_legacy=req.model is None,
                 )
             except ReceiptConflict:
                 raise HTTPException(status_code=409, detail="同一提交 ID 不能用于不同内容") from None
             if created:
                 task = asyncio.create_task(receipts.execute(
-                    receipt, lambda: message_handler(effective_id, req.message, **options),
+                    receipt, lambda: invoke_message(effective_id, req.message, options),
                 ))
                 chat_tasks.add(task)
                 task.add_done_callback(chat_tasks.discard)
@@ -1271,9 +1821,10 @@ def create_web_app(
 
         async def execute_message() -> ChatResponse:
             try:
-                reply = await message_handler(effective_id, req.message, **options)
+                reply = await invoke_message(effective_id, req.message, options)
                 return ChatResponse(chat_id=effective_id, reply=reply,
-                                    delivery="direct" if isinstance(reply, DirectReply) else None)
+                                    delivery="direct" if isinstance(reply, DirectReply) else None,
+                                    status="failed" if isinstance(reply, RejectedReply) else None)
             except Exception:
                 logger.error("Chat endpoint failed; private exception details withheld")
                 raise HTTPException(status_code=500, detail="消息处理失败，请查看任务状态后再重试") from None
@@ -1287,6 +1838,28 @@ def create_web_app(
         chat_tasks.add(task)
         task.add_done_callback(release_task)
         return await asyncio.shield(task)
+
+    @app.get("/api/chat/receipts/{request_id}/events", dependencies=[Depends(verify_token)])
+    async def receipt_events(request_id: str, chat_id: str = "web_default",
+                             authorization: str = Header(default="")):
+        import re
+        from sse_starlette.sse import EventSourceResponse
+        if receipts is None: raise HTTPException(501, "Text stream unavailable")
+        if not re.fullmatch(REQUEST_ID_PATTERN, request_id): raise HTTPException(400, "Invalid request ID")
+        effective_id = _effective_chat_id(chat_id, authorization)
+        receipt = await receipts.lookup(receipts.scope(effective_id, _extract_token(authorization)), request_id)
+        if receipt is None: raise HTTPException(404, "Receipt not found")
+        async def observe():
+            # Disconnect ends this observer only, never the receipt's background task.
+            previous = -1
+            for _ in range(1200):
+                snapshot = receipts.text_streams.snapshot(receipt['id'])
+                if snapshot['seq'] != previous:
+                    yield {'event':'snapshot','id':str(snapshot['seq']),'data':json.dumps(snapshot,ensure_ascii=False)}
+                    previous=snapshot['seq']
+                if snapshot['terminal'] or receipt['id'] not in receipts.active: return
+                await asyncio.sleep(.1)
+        return EventSourceResponse(observe(), headers={"Cache-Control":"no-store"})
 
     @app.get("/api/chat/receipts/{request_id}", dependencies=[Depends(verify_token)])
     async def chat_receipt(request_id: str, chat_id: str = "web_default",
@@ -1309,12 +1882,89 @@ def create_web_app(
                 receipt, (lambda: progress_handler(effective_id, include_history=False))
                 if progress_handler else None,
             )
+            if result.get("status") == "processing" and receipt_progress_handler:
+                native_status = await receipt_progress_handler(receipt["id"])
+                if native_status:
+                    result["message"] = str(native_status["message"])[:200]
+                    result["elapsed_seconds"] = max(0, float(native_status["elapsed_seconds"]))
             if result.get("progress"):
                 result["progress"] = _public_chat_progress(result["progress"])
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except Exception:
             logger.error("Chat receipt query failed; private exception details withheld")
             raise HTTPException(status_code=503, detail="回执暂时无法查询，请重新连接，不要换 ID 重发") from None
+
+    async def journal_chat(chat_id, authorization):
+        if db is None:
+            raise HTTPException(status_code=501, detail="当前服务未启用写操作核对")
+        if not chat_id or len(chat_id) > 128:
+            raise HTTPException(status_code=422, detail="无效会话 ID")
+        async with db.conn.execute(
+            "SELECT id FROM chats WHERE channel='web' AND external_chat_id=?",
+            (_effective_chat_id(chat_id, authorization),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row["id"] if row else None
+
+    @app.get("/api/chat/write-recovery", dependencies=[Depends(verify_token)])
+    async def write_recovery(chat_id: str = "web_default", authorization: str = Header(default="")):
+        from xclaw.tool_execution_journal import inspect_journal
+        cid = await journal_chat(chat_id, authorization)
+        rows = await inspect_journal(db, cid) if cid is not None else []
+        public = [{key: row[key] for key in ("id", "tool_name", "arguments_json", "state", "created_at", "updated_at")}
+                  for row in rows if row["state"] in {"started", "unknown"}]
+        return JSONResponse({"records": public}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/chat/write-recovery/acknowledge", dependencies=[Depends(verify_token)])
+    async def acknowledge_write(req: JournalAcknowledgeRequest, authorization: str = Header(default="")):
+        from xclaw.tool_execution_journal import acknowledge_unknown
+        cid = await journal_chat(req.chat_id, authorization)
+        if cid is None:
+            raise HTTPException(status_code=404, detail="未找到该会话待核对记录")
+        try:
+            await acknowledge_unknown(db, cid, req.execution_id,
+                confirmed_reviewed=req.confirmed_reviewed, execution_stopped=req.execution_stopped, note=req.note)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return JSONResponse({"status": "acknowledged", "message": "已记录人工核对并解除本条写入屏障；未重试，也不表示原操作成功。"},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/chat/history", dependencies=[Depends(verify_token)])
+    async def chat_history(chat_id: str = "web_default", authorization: str = Header(default="")) -> JSONResponse:
+        """Restore public chat messages using the same external/auth scope as sending."""
+        if db is None:
+            raise HTTPException(status_code=501, detail="当前服务未启用会话历史")
+        if not chat_id or len(chat_id) > 128:
+            raise HTTPException(status_code=422, detail="无效会话 ID")
+        effective_id = _effective_chat_id(chat_id, authorization)
+        async with db.conn.execute(
+            "SELECT id FROM chats WHERE channel=? AND external_chat_id=?", ("web", effective_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        public = []
+        if row:
+            async with db.conn.execute("SELECT id,role,content,response_model FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT 100", (row["id"],)) as cursor:
+                messages = list(reversed(await cursor.fetchall()))
+            # Older databases may not yet have any structured failed outcome.
+            async with db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='web_message_outcomes'") as cursor:
+                has_outcomes = await cursor.fetchone()
+            failed_ids = set()
+            if has_outcomes:
+                async with db.conn.execute("SELECT o.message_id FROM web_message_outcomes o JOIN messages m ON m.id=o.message_id WHERE m.chat_id=? AND o.status='failed'", (row["id"],)) as cursor:
+                    failed_ids = {item[0] for item in await cursor.fetchall()}
+            from xclaw.ui_presentations_v2 import presentation_metadata_for_messages
+            async with db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ui_presentations_v2'") as cursor:
+                has_v2 = await cursor.fetchone()
+            metadata = await presentation_metadata_for_messages(db, row["id"], [item["id"] for item in messages]) if has_v2 else {}
+            for item in messages:
+                if item["role"] in {"user", "assistant"} and isinstance(item["content"], str):
+                    entry = {"role": item["role"], "content": item["content"], **metadata.get(item["id"], {})}
+                    if item["response_model"]:
+                        entry["model"] = item["response_model"]
+                    if item["id"] in failed_ids:
+                        entry["status"] = "failed"
+                    public.append(entry)
+        return JSONResponse({"messages": public}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/chat/progress", dependencies=[Depends(verify_token)])
     async def chat_progress(
@@ -1351,16 +2001,26 @@ def create_web_app(
         """SSE streaming chat endpoint."""
         if req.request_id is not None:
             raise HTTPException(status_code=400, detail="带提交 ID 的请求请使用 /api/chat 和回执查询接口")
+        if req.execution_mode == "prepare":
+            raise HTTPException(status_code=400, detail="预览操作请使用 /api/chat 和回执查询接口")
         if stream_handler is None:
             raise HTTPException(status_code=501, detail="Streaming not enabled")
         effective_id = _effective_chat_id(req.chat_id, authorization)
         if req.attachments and not supports_images:
             raise HTTPException(status_code=400, detail="当前执行后端未启用图片输入")
 
+        chosen = selected_model(req)
         async def event_generator():
             try:
                 options = {"attachments": req.attachments} if req.attachments else {}
+                if req.model is not None or getattr(settings, "web_model_options", None):
+                    options["model"] = chosen
+                if req.execution_mode is not None:
+                    options["execution_mode"] = req.execution_mode
                 async for chunk in stream_handler(effective_id, req.message, **options):
+                    if isinstance(chunk, RejectedReply):
+                        yield {"event": "error", "data": json.dumps({"status": "failed", "reply": str(chunk)}, ensure_ascii=False)}
+                        return
                     yield {"data": chunk}
                 yield {"data": "[DONE]"}
             except Exception:

@@ -568,6 +568,12 @@ def create_provider(
     oauth_manager: Any | None = None,
 ) -> LLMProvider:
     """Factory that returns the correct LLMProvider based on config."""
+    if provider == "openai-responses":
+        if not base_url:
+            raise ValueError("openai-responses requires an explicit base_url")
+        from xclaw.llm_responses import ResponsesProvider
+        return ResponsesProvider(api_key=api_key, model=model,
+                                 base_url=base_url, timeout=timeout)
     if provider == "anthropic":
         return AnthropicProvider(api_key=api_key, model=model, timeout=timeout)
     if provider == "openai-codex":
