@@ -1,12 +1,30 @@
 # XClaw
 
-[中文手册](README.md) · [Reproduce the demo](docs/demo/README.md) · [Contributing](CONTRIBUTING.md)
+Would a trading rule have helped? Compare it with holding through the same period, then inspect the trades in XClaw’s self-hosted research chat.
 
-XClaw is a self-hosted Python agent for chat, task automation and market research. Ask questions in the web client or connect a messaging adapter. The investment tools cover quotes and history for supported mainland Chinese, Hong Kong and US securities, plus selected domestic futures. Availability varies by instrument and provider.
+[中文](README.md) · [First run](#run-locally) · [Low-bandwidth still](docs/demo/backtest.png)
 
-![The XClaw chat client showing a Chinese Markdown table comparing three synthetic daily closes](docs/demo/chat.png)
+![A synthetic backtest replay showing the question, benchmark comparison and trade ledger](docs/demo/backtest.gif)
 
-The screenshot uses a fixed question and answer. The real chat renderer formats the table; the fixture contacts neither a model nor a market-data provider.
+**Would switching on a 10/30-day moving-average crossover have beaten holding from March through May?** Across 65 synthetic weekday closes from March 3 to May 30, 2025, the strategy lost 8.69%, versus 1.14% for buy-and-hold. Strategy drawdown reached 12.34%. The ledger shows an April 28 purchase at 112.69 and a May 28 sale at 108.15.
+
+This 13.5-second deterministic replay uses the main-branch backtest tool and Web client. Prices are generated, questions are scripted and frame durations are fixed. The example illustrates a research method and provides no investment recommendation. [Reproduce the results](docs/demo/README.md)
+
+**First run** · With Python 3.12+ in the checkout, run `python -m pip install -e .`, then `xclaw setup` and `xclaw start --config xclaw.config.yaml`.
+
+### Why was this on my watchlist?
+
+Save the fictional symbol DEMO with the note “check volume on Friday.” Ask for the list again and the original note comes back alongside the symbol.
+
+![Two chat turns adding DEMO and retrieving the Friday reminder](docs/demo/watchlist.png)
+
+### What did my paper position cost?
+
+Record 20 shares at 12 yuan each. Viewing the position reads back the share count and average cost and calculates the total of 240 yuan.
+
+![The chat shows a simulated purchase receipt and the calculated cost](docs/demo/portfolio.png)
+
+Both replays use fixed questions, run the actual tools against fresh in-memory databases and display their output in the Web chat renderer. No model key is needed for the replays.
 
 ## Run locally
 

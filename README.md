@@ -1,18 +1,30 @@
 # XClaw
 
-> 基于 MicroClaw 思路的 Python 多功能 **AI Agent 运行时**，聚焦**任务处理**与**A股/美股/港股投资助手**，面向中国用户打造。
+一套择时规则值得用吗？在 XClaw 的自托管聊天界面里，把策略和一直持有放在同一区间比较，再翻看买卖记录。
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![uv-ci](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml/badge.svg?branch=main)](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml)
+[English](README.en.md) · [首次运行](#快速开始) · [低带宽静图](docs/demo/backtest.png)
 
----
+![合成回测回放：提出问题、比较收益与回撤、查看交易记录](docs/demo/backtest.gif)
 
-[English guide](README.en.md) · [快速开始](#快速开始) · [贡献与问题反馈](CONTRIBUTING.md)
+**3 月到 5 月，按 10/30 日均线换仓，比一直持有好吗？** 在 2025-03-03 至 2025-05-30 的 65 个合成工作日样本中，均线策略亏损 8.69%，持有亏损 1.14%，策略最大回撤 12.34%。追看交易记录，可以看到 4 月 28 日以 112.69 买入，5 月 28 日以 108.15 卖出。
 
-![XClaw 聊天页面用表格比较三天的合成收盘价](docs/demo/chat.png)
+13.5 秒确定性回放使用主线回测工具和 Web 界面。价格由公式生成，问题和镜头时长固定；结果仅用于演示研究过程，不构成投资建议。[复现案例](docs/demo/README.md)
 
-上图展示 Web 客户端如何排版 Markdown 表格和中文结论。问题、回复和价格均为固定样本，无需模型密钥或行情账户即可复现。[演示脚本与步骤](docs/demo/README.md)
+**第一次运行** · 安装 Python 3.12+，在仓库根目录运行 `python -m pip install -e .`，然后执行 `xclaw setup` 和 `xclaw start --config xclaw.config.yaml`。
+
+### 到周五，还记得为什么关注它吗？
+
+把虚构标的 DEMO 加入自选，写下「周五复核成交量」。再查自选，代码和当初的备注一起返回。
+
+![聊天窗口中先添加 DEMO，再从自选列表读回备注](docs/demo/watchlist.png)
+
+### 20 股，每股 12 元，这笔模拟记录占了多少本金？
+
+记录一次模拟买入，再查看持仓。工具从记录读回 20 股、均价 12 元，算出总成本 240 元。
+
+![聊天窗口显示模拟买入回执和 240 元成本](docs/demo/portfolio.png)
+
+两段对话使用固定提问，直接运行主线工具并将原始结果放进真实 Web 聊天界面。每段使用全新的内存数据库，无需模型密钥。
 
 ## 一条查询如何得到答案
 
