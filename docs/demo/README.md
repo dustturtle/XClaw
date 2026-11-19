@@ -11,3 +11,12 @@ python docs/demo/render.py --chrome /path/to/chromium --output docs/demo/chat.pn
 ~~~
 
 Chrome uses a temporary browser profile and renders a 1120 × 760 viewport. Fonts can differ between operating systems. The prices 100.00, 103.00 and 101.97 are synthetic. The daily percentage changes are +3% and −1%.
+
+## Replay the homepage stories
+
+Install the checkout using the steps above. Set CHROME to the path of your Chromium executable. Each command creates a fresh browser profile and SQLite database. The prompts select fixed tool calls and the Web client renders their returned text. This exercises storage, retrieval and presentation without model inference or a running server.
+
+~~~sh
+python docs/demo/render.py --chrome "$CHROME" --story watchlist --output docs/demo/watchlist.png
+python docs/demo/render.py --chrome "$CHROME" --story portfolio --output docs/demo/portfolio.png
+~~~

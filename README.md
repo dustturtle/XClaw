@@ -1,18 +1,24 @@
 # XClaw
 
-> 基于 MicroClaw 思路的 Python 多功能 **AI Agent 运行时**，聚焦**任务处理**与**A股/美股/港股投资助手**，面向中国用户打造。
+把复盘时想查的事留给下次，把模拟买入的成本当场算清。XClaw 是给自己做投资笔记的人用的自托管聊天助手。
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![uv-ci](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml/badge.svg?branch=main)](https://github.com/dustturtle/XClaw/actions/workflows/uv-ci.yml)
+[English](README.en.md) · [首次运行](#快速开始) · [复现下面两段对话](docs/demo/README.md)
 
----
+**第一次运行** · 安装 Python 3.12+，在仓库根目录执行 `python -m pip install -e .`、`xclaw setup`、`xclaw start --config xclaw.config.yaml`，再打开默认地址 http://127.0.0.1:8080/ 。
 
-[English guide](README.en.md) · [快速开始](#快速开始) · [贡献与问题反馈](CONTRIBUTING.md)
+### 到周五，还记得为什么关注它吗？
 
-![XClaw 聊天页面用表格比较三天的合成收盘价](docs/demo/chat.png)
+把虚构标的 DEMO 加入自选，写下「周五复核成交量」。再查自选，代码和当初的备注一起返回。
 
-上图展示 Web 客户端如何排版 Markdown 表格和中文结论。问题、回复和价格均为固定样本，无需模型密钥或行情账户即可复现。[演示脚本与步骤](docs/demo/README.md)
+![聊天窗口中先添加 DEMO，再从自选列表读回备注](docs/demo/watchlist.png)
+
+### 20 股，每股 12 元，这笔模拟记录占了多少本金？
+
+记录一次模拟买入，再查看持仓。工具从记录读回 20 股、均价 12 元，算出总成本 240 元。
+
+![聊天窗口显示模拟买入回执和 240 元成本](docs/demo/portfolio.png)
+
+两段对话使用固定提问，直接运行主线工具并将原始结果放进真实 Web 聊天界面。每段使用全新的内存数据库，无需模型密钥。
 
 ## 一条查询如何得到答案
 
